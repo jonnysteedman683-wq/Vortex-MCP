@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.vortex-data/
+*.db
+*.sqlite3
