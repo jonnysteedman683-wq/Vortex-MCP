@@ -57,4 +57,30 @@ class Settings:
             if len(set(tokens.values())) != len(tokens):
                 raise RuntimeError("Development bearer tokens must be distinct per agent")
             return cls(mode, host, port, data_dir, development_tokens=tokens)
-        raise RuntimeError("OAuth mode is not enabled until an authorization provider is selected and compatibility is verified")
+        if mode == "oauth":
+            return cls(
+                auth_mode="oauth",
+                host=host,
+                port=port,
+                data_dir=data_dir,
+                public_url=_https_url("VORTEX_PUBLIC_URL"),
+                oauth_issuer=_https_url("VORTEX_OAUTH_ISSUER"),
+                oauth_introspection_url=_https_url("VORTEX_OAUTH_INTROSPECTION_URL"),
+                oauth_client_id=_required("VORTEX_OAUTH_CLIENT_ID"),
+                oauth_client_secret=_required("VORTEX_OAUTH_CLIENT_SECRET"),
+                identity_clients={
+                    agent: _required("VORTEX_SUBJECT_" + agent.upper().replace("-", "_"))
+                    for agent in AGENT_IDS
+                },
+                allowed_hosts=tuple(
+                    h.strip()
+                    for h in _required("VORTEX_ALLOWED_HOSTS").split(",")
+                    if h.strip()
+                ),
+                allowed_origins=tuple(
+                    o.strip()
+                    for o in _required("VORTEX_ALLOWED_ORIGINS").split(",")
+                    if o.strip()
+                ),
+            )
+        raise RuntimeError("VORTEX_AUTH_MODE must be 'development' or 'oauth'")

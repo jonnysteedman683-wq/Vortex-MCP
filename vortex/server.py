@@ -75,10 +75,12 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
             resource_url=resource_url,
             identity_clients=settings.identity_clients,
         )
+        hostnames = list(settings.allowed_hosts)
+        origins = list(settings.allowed_origins)
         transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=list(settings.allowed_hosts),
-            allowed_origins=list(settings.allowed_origins),
+            allowed_hosts=hostnames,
+            allowed_origins=origins,
         )
 
     auth = AuthSettings(

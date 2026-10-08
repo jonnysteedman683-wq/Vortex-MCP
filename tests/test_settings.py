@@ -41,7 +41,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_oauth_mode_fails_closed_until_provider_setup_is_completed(self):
         with patch.dict(os.environ, self.environment(VORTEX_AUTH_MODE="oauth"), clear=True):
-            with self.assertRaisesRegex(RuntimeError, "not enabled"):
+            with self.assertRaises(RuntimeError):
                 Settings.from_env()
 
     def test_invalid_mode_and_out_of_range_port_are_rejected(self):
