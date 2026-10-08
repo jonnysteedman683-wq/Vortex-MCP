@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 .env
+.env.*
+!.env.example
 .vortex-data/
+.vortex-data*/
 *.db
 *.sqlite3

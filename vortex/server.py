@@ -74,6 +74,7 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
             issuer=settings.oauth_issuer,
             resource_url=resource_url,
             identity_clients=settings.identity_clients,
+            ca_bundle=settings.oauth_ca_bundle,
         )
         hostnames = list(settings.allowed_hosts)
         origins = list(settings.allowed_origins)

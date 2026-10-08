@@ -32,6 +32,7 @@ class IntrospectionTokenVerifier(TokenVerifier):
         identity_clients: Mapping[str, str],
         timeout: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        ca_bundle: str | None = None,
     ) -> None:
         for label, url in (("introspection_url", introspection_url), ("issuer", issuer), ("resource_url", resource_url)):
             parsed = urlparse(url)
@@ -49,6 +50,9 @@ class IntrospectionTokenVerifier(TokenVerifier):
         self.client_agents = {client_id: agent for agent, client_id in identity_clients.items()}
         self.timeout = timeout
         self.transport = transport
+        # Optional extra CA bundle (PEM) for introspection over an internal /
+        # Tailscale-signed endpoint that is not in the system trust store.
+        self.ca_bundle = ca_bundle
 
     async def verify_token(self, token: str) -> AccessToken | None:
         if not token or len(token) > 8192:
@@ -59,6 +63,7 @@ class IntrospectionTokenVerifier(TokenVerifier):
                 timeout=self.timeout,
                 follow_redirects=False,
                 transport=self.transport,
+                verify=self.ca_bundle or True,
             ) as client:
                 response = await client.post(
                     self.introspection_url,
