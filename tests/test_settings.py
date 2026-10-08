@@ -44,6 +44,49 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 Settings.from_env()
 
+    def test_ca_bundle_must_exist_when_set(self):
+        env = self.environment(
+            VORTEX_AUTH_MODE="oauth",
+            VORTEX_PUBLIC_URL="https://vortex.example.test",
+            VORTEX_OAUTH_ISSUER="https://id.example.test/realms/vortex",
+            VORTEX_OAUTH_INTROSPECTION_URL="https://id.example.test/introspect",
+            VORTEX_OAUTH_CLIENT_ID="introspector",
+            VORTEX_OAUTH_CLIENT_SECRET="secret",
+            VORTEX_SUBJECT_HERMES_1="hermes-1",
+            VORTEX_SUBJECT_HERMES_2="hermes-2",
+            VORTEX_SUBJECT_ANTIGRAVITY_1="antigravity-1",
+            VORTEX_SUBJECT_SPARK_1="spark-1",
+            VORTEX_ALLOWED_HOSTS="vortex.example.test",
+            VORTEX_ALLOWED_ORIGINS="https://vortex.example.test",
+            VORTEX_OAUTH_CA_BUNDLE="/does/not/exist.pem",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "existing file"):
+                Settings.from_env()
+
+    def test_oauth_mode_parses_all_required_fields(self):
+        env = self.environment(
+            VORTEX_AUTH_MODE="oauth",
+            VORTEX_PUBLIC_URL="https://vortex.example.test",
+            VORTEX_OAUTH_ISSUER="https://id.example.test/realms/vortex",
+            VORTEX_OAUTH_INTROSPECTION_URL="https://id.example.test/introspect",
+            VORTEX_OAUTH_CLIENT_ID="introspector",
+            VORTEX_OAUTH_CLIENT_SECRET="secret",
+            VORTEX_SUBJECT_HERMES_1="hermes-1",
+            VORTEX_SUBJECT_HERMES_2="hermes-2",
+            VORTEX_SUBJECT_ANTIGRAVITY_1="antigravity-1",
+            VORTEX_SUBJECT_SPARK_1="spark-1",
+            VORTEX_ALLOWED_HOSTS="vortex.example.test, alt.example.test",
+            VORTEX_ALLOWED_ORIGINS="https://vortex.example.test",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.auth_mode, "oauth")
+        self.assertEqual(settings.public_url, "https://vortex.example.test")
+        self.assertEqual(settings.identity_clients["hermes-1"], "hermes-1")
+        self.assertEqual(settings.allowed_hosts, ("vortex.example.test", "alt.example.test"))
+        self.assertIsNone(settings.oauth_ca_bundle)
+
     def test_invalid_mode_and_out_of_range_port_are_rejected(self):
         for values in (self.environment(VORTEX_AUTH_MODE="unknown"),
                        self.environment(VORTEX_PORT="70000")):

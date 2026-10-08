@@ -23,6 +23,17 @@ def _https_url(name: str) -> str:
     return value.rstrip("/")
 
 
+def _optional_ca_bundle(name: str) -> str | None:
+    """Optional PEM bundle that augments the system trust store (e.g. an
+    internal or Tailscale-signed CA). Must exist when set."""
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    if not os.path.isfile(value):
+        raise RuntimeError(f"{name} does not point to an existing file: {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     auth_mode: str
@@ -34,6 +45,7 @@ class Settings:
     oauth_introspection_url: str | None = None
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
+    oauth_ca_bundle: str | None = None
     identity_clients: dict[str, str] | None = None
     allowed_hosts: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()
@@ -68,6 +80,7 @@ class Settings:
                 oauth_introspection_url=_https_url("VORTEX_OAUTH_INTROSPECTION_URL"),
                 oauth_client_id=_required("VORTEX_OAUTH_CLIENT_ID"),
                 oauth_client_secret=_required("VORTEX_OAUTH_CLIENT_SECRET"),
+                oauth_ca_bundle=_optional_ca_bundle("VORTEX_OAUTH_CA_BUNDLE"),
                 identity_clients={
                     agent: _required("VORTEX_SUBJECT_" + agent.upper().replace("-", "_"))
                     for agent in AGENT_IDS
