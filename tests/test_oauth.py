@@ -94,6 +94,21 @@ class IntrospectionVerifierTests(unittest.TestCase):
         verifier = self.make_verifier({}, transport=transport)
         self.assertIsNone(asyncio.run(verifier.verify_token("presented-token")))
 
+    def test_malformed_issuer_audience_and_expiry_fail_closed(self):
+        base = {
+            "active": True, "sub": "user-h1", "client_id": "client-h1",
+            "iss": "https://id.example.test/", "aud": "https://vortex.example.test/mcp",
+            "scope": "vortex:connect vortex:read vortex:message", "exp": 2000000000,
+        }
+        for changes in (
+            {"iss": 123},
+            {"aud": ["https://vortex.example.test/mcp", None]},
+            {"exp": True},
+            {"exp": float("nan")},
+        ):
+            with self.subTest(changes=changes):
+                self.assertIsNone(asyncio.run(self.make_verifier(base | changes).verify_token("presented-token")))
+
 
 if __name__ == "__main__":
     unittest.main()
