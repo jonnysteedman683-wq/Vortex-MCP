@@ -19,6 +19,8 @@ MCP tools alone do not wake an inactive agent. Vortex messages are queued and de
 
 ## Development
 
+To add more configured agent connections, set `VORTEX_AGENT_IDS` to a comma-separated list such as `hermes-1,hermes-2,antigravity-1,spark-1,oracle-1`. The server then requires matching `VORTEX_TOKEN_<AGENT>` and `VORTEX_SUBJECT_<AGENT>` values for every configured identity.
+
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
