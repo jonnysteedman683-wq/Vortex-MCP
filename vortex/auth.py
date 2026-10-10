@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
 from urllib.parse import urlparse
 
@@ -83,14 +84,20 @@ class IntrospectionTokenVerifier(TokenVerifier):
         agent_id = self.client_agents.get(authenticated_client) if isinstance(authenticated_client, str) else None
         if agent_id is None:
             return None
-        if claims.get("iss", "").rstrip("/") != self.issuer:
+        issuer = claims.get("iss")
+        if not isinstance(issuer, str) or issuer.rstrip("/") != self.issuer:
             return None
         aud = claims.get("aud")
         audiences = aud if isinstance(aud, list) else [aud]
-        if self.resource_url not in audiences:
+        if not all(isinstance(audience, str) for audience in audiences) or self.resource_url not in audiences:
             return None
         exp = claims.get("exp")
-        if not isinstance(exp, (int, float)) or exp <= time.time():
+        if (
+            isinstance(exp, bool)
+            or not isinstance(exp, (int, float))
+            or (isinstance(exp, float) and not isfinite(exp))
+            or exp <= time.time()
+        ):
             return None
         raw_scope = claims.get("scope", "")
         if not isinstance(raw_scope, str):

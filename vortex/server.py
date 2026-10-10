@@ -23,12 +23,13 @@ load_dotenv()
 class DevelopmentTokenVerifier(TokenVerifier):
     """Static local-only tokens. Refuse any non-loopback binding in Settings."""
 
-    def __init__(self, tokens: dict[str, str] | None):
+    def __init__(self, tokens: dict[str, str] | None, resource_url: str):
         tokens = tokens or {}
         self._token_hashes = {
             hashlib.sha256(token.encode("utf-8")).hexdigest(): agent_id
             for agent_id, token in tokens.items()
         }
+        self.resource_url = resource_url
 
     async def verify_token(self, token: str) -> AccessToken | None:
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -39,7 +40,7 @@ class DevelopmentTokenVerifier(TokenVerifier):
                     client_id=agent_id,
                     subject=agent_id,
                     scopes=["vortex:connect", "vortex:read", "vortex:message"],
-                    resource=f"http://127.0.0.1:{os.getenv('VORTEX_PORT', '8000')}/mcp",
+                    resource=self.resource_url,
                 )
         return None
 
@@ -58,11 +59,18 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
     if settings.auth_mode == "development":
         issuer_url = f"http://127.0.0.1:{settings.port}"
         resource_url = issuer_url + "/mcp"
-        verifier: TokenVerifier = DevelopmentTokenVerifier(settings.development_tokens)
+        verifier: TokenVerifier = DevelopmentTokenVerifier(settings.development_tokens, resource_url)
         transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:8000", "localhost:8000", "[::1]:8000"],
-            allowed_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+            allowed_hosts=[
+                f"127.0.0.1:{settings.port}",
+                f"localhost:{settings.port}",
+                f"[::1]:{settings.port}",
+            ],
+            allowed_origins=[
+                f"http://127.0.0.1:{settings.port}",
+                f"http://localhost:{settings.port}",
+            ],
         )
     else:
         issuer_url = settings.oauth_issuer
