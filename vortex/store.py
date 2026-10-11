@@ -66,6 +66,8 @@ class VortexStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_inbox
                     ON messages(recipient_id, acked_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_messages_inbox_cursor
+                    ON messages(recipient_id, acked_at, created_at, message_id);
                 CREATE INDEX IF NOT EXISTS idx_messages_thread
                     ON messages(thread_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_messages_reply_to
@@ -151,17 +153,65 @@ class VortexStore:
                 "recipient_id": recipient_id, "body": body, "created_at": created_at,
                 "reply_to": reply_to, "delivery": "queued"}
 
-    def inbox(self, agent_id: str, limit: int = 20, include_acked: bool = False) -> list[dict[str, Any]]:
+    def inbox(self, agent_id: str, limit: int = 20, include_acked: bool = False,
+              after_message_id: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 100))
         query = "SELECT * FROM messages WHERE recipient_id=?"
         args: list[Any] = [agent_id]
         if not include_acked:
             query += " AND acked_at IS NULL"
-        query += " ORDER BY created_at LIMIT ?"
-        args.append(limit)
         with self._lock:
+            if after_message_id is not None:
+                cursor = self._db.execute(
+                    "SELECT recipient_id,created_at,message_id FROM messages WHERE message_id=?",
+                    (after_message_id,),
+                ).fetchone()
+                if cursor is None:
+                    raise ValueError("Inbox cursor message not found")
+                if cursor["recipient_id"] != agent_id:
+                    raise PermissionError("Inbox cursor must belong to the authenticated recipient")
+                query += " AND (created_at > ? OR (created_at = ? AND message_id > ?))"
+                args.extend((cursor["created_at"], cursor["created_at"], cursor["message_id"]))
+            query += " ORDER BY created_at,message_id LIMIT ?"
+            args.append(limit)
             rows = self._db.execute(query, args).fetchall()
         return [dict(row) for row in rows]
+
+    def acknowledge_many(self, agent_id: str, message_ids: list[str]) -> list[dict[str, Any]]:
+        if not 1 <= len(message_ids) <= 100:
+            raise ValueError("Provide between 1 and 100 message IDs")
+        if any(not isinstance(message_id, str) or not message_id for message_id in message_ids):
+            raise ValueError("Message IDs must be non-empty strings")
+        if len(set(message_ids)) != len(message_ids):
+            raise ValueError("Message IDs must not contain duplicates")
+
+        with self._lock, self._db:
+            rows = []
+            for message_id in message_ids:
+                row = self._db.execute(
+                    "SELECT * FROM messages WHERE message_id=?", (message_id,)
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Message not found")
+                if row["recipient_id"] != agent_id:
+                    raise PermissionError("Only the addressed recipient can acknowledge a message")
+                rows.append(row)
+
+            acked_at = iso(utc_now())
+            for row in rows:
+                if row["acked_at"] is None:
+                    self._db.execute(
+                        "UPDATE messages SET acked_at=? WHERE message_id=?",
+                        (acked_at, row["message_id"]),
+                    )
+
+            acknowledged = []
+            for message_id in message_ids:
+                row = self._db.execute(
+                    "SELECT * FROM messages WHERE message_id=?", (message_id,)
+                ).fetchone()
+                acknowledged.append(dict(row))
+        return acknowledged
 
     def acknowledge(self, agent_id: str, message_id: str) -> dict[str, Any]:
         with self._lock, self._db:

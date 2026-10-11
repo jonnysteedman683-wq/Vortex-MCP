@@ -37,6 +37,63 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.inbox("spark-1"), [])
         self.assertEqual(len(self.store.inbox("spark-1", include_acked=True)), 1)
 
+    def test_inbox_pages_are_stable_and_cursor_is_recipient_scoped(self):
+        for index in range(5):
+            self.store.send("hermes-1", "spark-1", f"Message {index}")
+
+        messages = self.store.inbox("spark-1", include_acked=True)
+        first_page = self.store.inbox("spark-1", limit=2, include_acked=True)
+        second_page = self.store.inbox(
+            "spark-1", limit=2, include_acked=True,
+            after_message_id=first_page[-1]["message_id"],
+        )
+        final_page = self.store.inbox(
+            "spark-1", include_acked=True,
+            after_message_id=second_page[-1]["message_id"],
+        )
+        self.assertEqual(first_page + second_page + final_page, messages)
+        with self.assertRaises(PermissionError):
+            self.store.inbox("hermes-1", after_message_id=messages[0]["message_id"])
+        with self.assertRaises(ValueError):
+            self.store.inbox("spark-1", after_message_id="missing")
+
+    def test_bulk_acknowledgement_is_atomic_and_idempotent(self):
+        first = self.store.send("hermes-1", "spark-1", "First")
+        second = self.store.send("hermes-2", "spark-1", "Second")
+        third = self.store.send("hermes-1", "hermes-2", "Not Spark's")
+
+        with self.assertRaises(PermissionError):
+            self.store.acknowledge_many(
+                "spark-1", [first["message_id"], third["message_id"]]
+            )
+        self.assertEqual(len(self.store.inbox("spark-1")), 2)
+
+        acknowledged = self.store.acknowledge_many(
+            "spark-1", [first["message_id"], second["message_id"]]
+        )
+        self.assertTrue(all(message["acked_at"] for message in acknowledged))
+        again = self.store.acknowledge_many(
+            "spark-1", [first["message_id"], second["message_id"]]
+        )
+        self.assertEqual(
+            [message["acked_at"] for message in acknowledged],
+            [message["acked_at"] for message in again],
+        )
+        self.assertEqual(self.store.inbox("spark-1"), [])
+
+    def test_bulk_acknowledgement_rejects_invalid_batches(self):
+        message = self.store.send("hermes-1", "spark-1", "Hello")
+        for message_ids in (
+            [],
+            [message["message_id"]] * 2,
+            ["missing"],
+        ):
+            with self.subTest(message_ids=message_ids), self.assertRaises(ValueError):
+                self.store.acknowledge_many("spark-1", message_ids)
+        with self.assertRaises(ValueError):
+            self.store.acknowledge_many("spark-1", ["x"] * 101)
+        self.assertEqual(len(self.store.inbox("spark-1")), 1)
+
     def test_unknown_agent_cannot_register_or_receive(self):
         with self.assertRaises(ValueError):
             self.store.register("rogue")
