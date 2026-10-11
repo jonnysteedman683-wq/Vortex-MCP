@@ -146,14 +146,33 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         return store.send(_identity(agent_ids), recipient_id, body)
 
     @server.tool()
-    def vortex_get_inbox(limit: int = 20) -> list[dict[str, Any]]:
-        """Read pending messages addressed to this authenticated instance."""
-        return store.inbox(_identity(agent_ids), limit=limit)
+    def vortex_get_inbox(
+        limit: int = 20,
+        after_message_id: str | None = None,
+        include_acked: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Read inbox messages in stable pages; pass the last message ID to continue."""
+        return store.inbox(
+            _identity(agent_ids),
+            limit=limit,
+            include_acked=include_acked,
+            after_message_id=after_message_id,
+        )
 
     @server.tool()
     def vortex_ack_message(message_id: str) -> dict[str, Any]:
         """Acknowledge a message addressed to this authenticated instance."""
         return store.acknowledge(_identity(agent_ids), message_id)
+
+    @server.tool()
+    def vortex_ack_messages(message_ids: list[str]) -> list[dict[str, Any]]:
+        """Atomically acknowledge 1-100 messages addressed to this instance."""
+        return store.acknowledge_many(_identity(agent_ids), message_ids)
+
+    @server.tool()
+    def vortex_get_thread(message_id: str) -> list[dict[str, Any]]:
+        """Read the complete message thread for a message involving this instance."""
+        return store.thread(_identity(agent_ids), message_id)
 
     @server.tool()
     def vortex_reply_message(message_id: str, body: str) -> dict[str, Any]:

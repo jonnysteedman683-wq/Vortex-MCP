@@ -44,8 +44,12 @@ Set `VORTEX_AUTH_MODE=oauth` plus the `VORTEX_OAUTH_*` block in `.env.example`. 
 - `vortex_register_agent`: validate/register one of the four configured instance identities and refresh its presence.
 - `vortex_list_agents`: list connection/presence metadata (no credentials).
 - `vortex_send_message`: send a bounded message to one instance; use reply tool for threads.
-- `vortex_get_inbox`: read pending messages addressed to the authenticated instance.
+- `vortex_get_inbox`: read pending messages addressed to the authenticated instance, with stable cursor pagination (`after_message_id`) and optional acknowledged-message history.
 - `vortex_ack_message`: acknowledge delivery/read of an inbox message.
+- `vortex_ack_messages`: atomically acknowledge 1-100 inbox messages; the whole batch is rejected if any message is missing or belongs to another instance.
+- `vortex_get_thread`: read the complete thread for a message involving the authenticated instance.
 - `vortex_reply_message`: send a threaded reply to a message's sender.
+
+Inbox pages are ordered by creation time and message ID. To fetch the next page, pass the last message's `message_id` as `after_message_id`; cursors are scoped to the authenticated recipient.
 
 The implementation intentionally does not execute shell commands, read/write arbitrary files, or claim to dispatch work into idle agents. Individual MCP clients authenticate as distinct Vortex identities.
