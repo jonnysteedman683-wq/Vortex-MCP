@@ -5,7 +5,20 @@ import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-AGENT_IDS = ("hermes-1", "hermes-2", "antigravity-1", "spark-1")
+DEFAULT_AGENT_IDS = ("hermes-1", "hermes-2", "antigravity-1", "spark-1")
+AGENT_IDS = DEFAULT_AGENT_IDS
+
+
+def _parse_agent_ids() -> tuple[str, ...]:
+    raw = os.getenv("VORTEX_AGENT_IDS", "").strip()
+    if not raw:
+        return AGENT_IDS
+    ids = tuple(part.strip() for part in raw.split(",") if part.strip())
+    if not ids or any(not agent or agent.startswith("-") for agent in ids):
+        raise RuntimeError("VORTEX_AGENT_IDS must contain one or more non-empty agent IDs")
+    if len(set(ids)) != len(ids):
+        raise RuntimeError("VORTEX_AGENT_IDS must not contain duplicate agent IDs")
+    return ids
 
 
 def _required(name: str) -> str:
@@ -40,6 +53,7 @@ class Settings:
     host: str
     port: int
     data_dir: str
+    agent_ids: tuple[str, ...] = ()
     public_url: str | None = None
     oauth_issuer: str | None = None
     oauth_introspection_url: str | None = None
@@ -57,6 +71,7 @@ class Settings:
         host = os.getenv("VORTEX_HOST", "127.0.0.1").strip()
         port = int(os.getenv("VORTEX_PORT", "8000"))
         data_dir = os.getenv("VORTEX_DATA_DIR", ".vortex-data")
+        agent_ids = _parse_agent_ids()
         if not 1 <= port <= 65535:
             raise RuntimeError("VORTEX_PORT must be between 1 and 65535")
         if mode == "development":
@@ -64,17 +79,18 @@ class Settings:
                 raise RuntimeError("Development auth is loopback-only; remote TLS/OAuth is not implemented")
             tokens = {
                 agent: _required("VORTEX_TOKEN_" + agent.upper().replace("-", "_"))
-                for agent in AGENT_IDS
+                for agent in agent_ids
             }
             if len(set(tokens.values())) != len(tokens):
                 raise RuntimeError("Development bearer tokens must be distinct per agent")
-            return cls(mode, host, port, data_dir, development_tokens=tokens)
+            return cls(mode, host, port, data_dir, agent_ids=agent_ids, development_tokens=tokens)
         if mode == "oauth":
             return cls(
                 auth_mode="oauth",
                 host=host,
                 port=port,
                 data_dir=data_dir,
+                agent_ids=agent_ids,
                 public_url=_https_url("VORTEX_PUBLIC_URL"),
                 oauth_issuer=_https_url("VORTEX_OAUTH_ISSUER"),
                 oauth_introspection_url=_https_url("VORTEX_OAUTH_INTROSPECTION_URL"),
@@ -83,7 +99,7 @@ class Settings:
                 oauth_ca_bundle=_optional_ca_bundle("VORTEX_OAUTH_CA_BUNDLE"),
                 identity_clients={
                     agent: _required("VORTEX_SUBJECT_" + agent.upper().replace("-", "_"))
-                    for agent in AGENT_IDS
+                    for agent in agent_ids
                 },
                 allowed_hosts=tuple(
                     h.strip()

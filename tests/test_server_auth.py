@@ -55,6 +55,23 @@ class ServerAuthTests(unittest.TestCase):
         self.assertEqual(access.resource, "http://127.0.0.1:8123/mcp")
         store.close()
 
+    def test_development_token_verifier_rejects_non_loopback_resource_urls(self):
+        with self.assertRaises(ValueError):
+            DevelopmentTokenVerifier({"hermes-1": "token-a"}, "https://example.com/mcp")
+
+    def test_development_server_uses_ipv6_loopback_resource_for_ipv6_bind(self):
+        settings = Settings(
+            auth_mode="development", host="::1", port=8124,
+            data_dir=".vortex-data", development_tokens={
+                "hermes-1": "a", "hermes-2": "b", "antigravity-1": "c", "spark-1": "d",
+            },
+        )
+        store = VortexStore(":memory:")
+        server = create_server(store, settings)
+        self.assertEqual(server._token_verifier.resource_url, "http://[::1]:8124/mcp")
+        self.assertIn("http://[::1]:8124", server.settings.transport_security.allowed_origins)
+        store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

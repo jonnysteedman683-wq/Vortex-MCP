@@ -28,8 +28,11 @@ def iso(value: datetime) -> str:
 class VortexStore:
     """Synchronous, thread-safe SQLite store; no message body is written to logs."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, agents: dict[str, str] | None = None):
         self.path = str(path)
+        self._agents = dict(DEFAULT_AGENTS)
+        if agents:
+            self._agents.update(agents)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -66,7 +69,7 @@ class VortexStore:
                 CREATE INDEX IF NOT EXISTS idx_messages_thread
                     ON messages(thread_id, created_at);
             """)
-            for agent_id, display_name in DEFAULT_AGENTS.items():
+            for agent_id, display_name in self._agents.items():
                 platform = "hermes" if agent_id.startswith("hermes-") else (
                     "antigravity" if agent_id.startswith("antigravity-") else "spark"
                 )

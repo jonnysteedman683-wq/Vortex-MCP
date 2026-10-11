@@ -31,6 +31,7 @@ class IntrospectionTokenVerifier(TokenVerifier):
         issuer: str,
         resource_url: str,
         identity_clients: Mapping[str, str],
+        agent_ids: set[str] | tuple[str, ...] | None = None,
         timeout: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
         ca_bundle: str | None = None,
@@ -39,8 +40,9 @@ class IntrospectionTokenVerifier(TokenVerifier):
             parsed = urlparse(url)
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError(f"{label} must be an HTTPS URL without embedded credentials")
-        if set(identity_clients) != AGENT_IDS or any(not client for client in identity_clients.values()):
-            raise ValueError("Map exactly the four configured agent IDs to OAuth client IDs")
+        known_agents = set(agent_ids) if agent_ids is not None else set(identity_clients)
+        if set(identity_clients) != known_agents or any(not client for client in identity_clients.values()):
+            raise ValueError("Each configured agent must be mapped to a distinct OAuth client ID")
         if len(set(identity_clients.values())) != len(identity_clients):
             raise ValueError("Each configured agent must have a distinct OAuth client ID")
         self.introspection_url = introspection_url
@@ -107,7 +109,7 @@ class IntrospectionTokenVerifier(TokenVerifier):
             return None
         return AccessToken(
             token=token,
-            client_id=authenticated_client,
+            client_id=agent_id,
             subject=subject,
             scopes=sorted(scopes),
             expires_at=int(exp),

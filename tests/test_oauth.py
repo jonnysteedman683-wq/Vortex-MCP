@@ -43,7 +43,7 @@ class IntrospectionVerifierTests(unittest.TestCase):
             "client_id": "client-h2",
         })
         token = asyncio.run(verifier.verify_token("presented-token"))
-        self.assertEqual(token.client_id, "client-h2")
+        self.assertEqual(token.client_id, "hermes-2")
         self.assertEqual(token.subject, "user-h2")
         self.assertEqual(token.resource, "https://vortex.example.test/mcp")
         self.assertIn("vortex:message", token.scopes)

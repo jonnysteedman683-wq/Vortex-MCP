@@ -44,6 +44,29 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 Settings.from_env()
 
+    def test_custom_agent_ids_are_supported(self):
+        env = self.environment(
+            VORTEX_AGENT_IDS="hermes-1,hermes-2,antigravity-1,spark-1,atlas-1",
+            VORTEX_TOKEN_ATLAS_1="dev-token-5",
+            VORTEX_SUBJECT_ATLAS_1="atlas-1",
+            VORTEX_AUTH_MODE="oauth",
+            VORTEX_PUBLIC_URL="https://vortex.example.test",
+            VORTEX_OAUTH_ISSUER="https://id.example.test/realms/vortex",
+            VORTEX_OAUTH_INTROSPECTION_URL="https://id.example.test/introspect",
+            VORTEX_OAUTH_CLIENT_ID="introspector",
+            VORTEX_OAUTH_CLIENT_SECRET="secret",
+            VORTEX_SUBJECT_HERMES_1="hermes-1",
+            VORTEX_SUBJECT_HERMES_2="hermes-2",
+            VORTEX_SUBJECT_ANTIGRAVITY_1="antigravity-1",
+            VORTEX_SUBJECT_SPARK_1="spark-1",
+            VORTEX_ALLOWED_HOSTS="vortex.example.test",
+            VORTEX_ALLOWED_ORIGINS="https://vortex.example.test",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.agent_ids, ("hermes-1", "hermes-2", "antigravity-1", "spark-1", "atlas-1"))
+        self.assertEqual(settings.identity_clients["atlas-1"], "atlas-1")
+
     def test_ca_bundle_must_exist_when_set(self):
         env = self.environment(
             VORTEX_AUTH_MODE="oauth",
