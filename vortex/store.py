@@ -68,6 +68,8 @@ class VortexStore:
                     ON messages(recipient_id, acked_at, created_at);
                 CREATE INDEX IF NOT EXISTS idx_messages_thread
                     ON messages(thread_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_messages_reply_to
+                    ON messages(reply_to);
             """)
             for agent_id, display_name in self._agents.items():
                 platform = "hermes" if agent_id.startswith("hermes-") else (
@@ -102,6 +104,9 @@ class VortexStore:
             agents.append(entry)
         return agents
 
+    def _get_agent(self, conn: sqlite3.Connection, agent_id: str) -> sqlite3.Row | None:
+        return conn.execute("SELECT agent_id FROM agents WHERE agent_id=?", (agent_id,)).fetchone()
+
     def send(self, sender_id: str, recipient_id: str, body: str,
              thread_id: str | None = None, reply_to: str | None = None) -> dict[str, Any]:
         body = body.strip()
@@ -112,33 +117,37 @@ class VortexStore:
         if sender_id == recipient_id:
             raise ValueError("Cannot send a message to the same agent identity")
         with self._lock, self._db:
-            sender = self._db.execute("SELECT agent_id FROM agents WHERE agent_id=?", (sender_id,)).fetchone()
-            recipient = self._db.execute("SELECT agent_id FROM agents WHERE agent_id=?", (recipient_id,)).fetchone()
+            sender = self._get_agent(self._db, sender_id)
+            recipient = self._get_agent(self._db, recipient_id)
             if sender is None:
                 raise ValueError("Unknown sender identity")
             if recipient is None:
                 raise ValueError("Unknown recipient identity")
             if thread_id and not reply_to:
                 raise ValueError("Use reply_to to add a message to an existing thread")
+            resolved_thread_id = thread_id
             if reply_to:
-                parent = self._db.execute("SELECT thread_id,sender_id,recipient_id FROM messages WHERE message_id=?", (reply_to,)).fetchone()
+                parent = self._db.execute(
+                    "SELECT thread_id,sender_id,recipient_id FROM messages WHERE message_id=?",
+                    (reply_to,),
+                ).fetchone()
                 if parent is None:
                     raise ValueError("Reply target does not exist")
                 if sender_id not in (parent["sender_id"], parent["recipient_id"]):
                     raise PermissionError("Only participants in a message thread may reply")
                 if recipient_id not in (parent["sender_id"], parent["recipient_id"]) or recipient_id == sender_id:
                     raise PermissionError("Reply must be sent to the other participant")
-                if thread_id and thread_id != parent["thread_id"]:
+                if resolved_thread_id and resolved_thread_id != parent["thread_id"]:
                     raise ValueError("reply_to and thread_id identify different threads")
-                thread_id = parent["thread_id"]
+                resolved_thread_id = parent["thread_id"]
             message_id = str(uuid.uuid4())
-            thread_id = thread_id or str(uuid.uuid4())
+            resolved_thread_id = resolved_thread_id or str(uuid.uuid4())
             created_at = iso(utc_now())
             self._db.execute(
                 "INSERT INTO messages(message_id,thread_id,sender_id,recipient_id,body,created_at,reply_to) VALUES(?,?,?,?,?,?,?)",
-                (message_id, thread_id, sender_id, recipient_id, body, created_at, reply_to),
+                (message_id, resolved_thread_id, sender_id, recipient_id, body, created_at, reply_to),
             )
-        return {"message_id": message_id, "thread_id": thread_id, "sender_id": sender_id,
+        return {"message_id": message_id, "thread_id": resolved_thread_id, "sender_id": sender_id,
                 "recipient_id": recipient_id, "body": body, "created_at": created_at,
                 "reply_to": reply_to, "delivery": "queued"}
 
@@ -162,7 +171,8 @@ class VortexStore:
             if row["recipient_id"] != agent_id:
                 raise PermissionError("Only the addressed recipient can acknowledge this message")
             acked_at = row["acked_at"] or iso(utc_now())
-            self._db.execute("UPDATE messages SET acked_at=? WHERE message_id=?", (acked_at, message_id))
+            if row["acked_at"] is None:
+                self._db.execute("UPDATE messages SET acked_at=? WHERE message_id=?", (acked_at, message_id))
             result = dict(row)
             result["acked_at"] = acked_at
             return result
