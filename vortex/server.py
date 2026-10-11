@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import os
 from typing import Any
 from urllib.parse import urlparse
@@ -44,16 +43,16 @@ class DevelopmentTokenVerifier(TokenVerifier):
 
     async def verify_token(self, token: str) -> AccessToken | None:
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        for expected, agent_id in self._token_hashes.items():
-            if hmac.compare_digest(digest, expected):
-                return AccessToken(
-                    token=token,
-                    client_id=agent_id,
-                    subject=agent_id,
-                    scopes=["vortex:connect", "vortex:read", "vortex:message"],
-                    resource=self.resource_url,
-                )
-        return None
+        agent_id = self._token_hashes.get(digest)
+        if agent_id is None:
+            return None
+        return AccessToken(
+            token=token,
+            client_id=agent_id,
+            subject=agent_id,
+            scopes=["vortex:connect", "vortex:read", "vortex:message"],
+            resource=self.resource_url,
+        )
 
 
 def _identity(agent_ids: tuple[str, ...] | set[str]) -> str:
@@ -178,8 +177,7 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
     def vortex_reply_message(message_id: str, body: str) -> dict[str, Any]:
         """Reply in an existing thread to another participant."""
         sender = _identity(agent_ids)
-        thread = store.thread(sender, message_id)
-        parent = next(message for message in thread if message["message_id"] == message_id)
+        parent = store.message_context(sender, message_id)
         recipient = parent["recipient_id"] if parent["sender_id"] == sender else parent["sender_id"]
         return store.send(sender, recipient, body, reply_to=message_id)
 
