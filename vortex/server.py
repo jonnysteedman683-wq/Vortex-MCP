@@ -206,6 +206,24 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         )
 
     @server.tool()
+    def vortex_dispatch_tasks(
+        goal: str,
+        recipients: list[str],
+        priority: int = 3,
+        depends_on: list[str] | None = None,
+        idempotency_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Create one durable task per recipient in a single atomic batch."""
+        return store.dispatch_tasks(
+            _identity(agent_ids),
+            goal,
+            recipients,
+            priority=priority,
+            depends_on=depends_on,
+            idempotency_key=idempotency_key,
+        )
+
+    @server.tool()
     def vortex_list_tasks(status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         """List tasks created by or assigned to this agent, ordered by priority."""
         return store.list_tasks(_identity(agent_ids), status=status, limit=limit)

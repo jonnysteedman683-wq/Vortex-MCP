@@ -57,6 +57,7 @@ Inbox pages are ordered by creation time and message ID. To fetch the next page,
 Work items are separate from messages: they have a goal, creator, optional assignee, priority (1 is highest), dependencies, status, lease, result, and lifecycle event history. SQLite persists tasks and events across server restarts.
 
 - `vortex_create_task`: create work, optionally assign it, attach up to 20 dependencies, and provide an idempotency key for safe retries. Reusing a key with different task details is rejected.
+- `vortex_dispatch_tasks`: create one task per recipient in one atomic fan-out call; recipients must be configured agents, and each task is assigned to its own recipient.
 - `vortex_list_tasks` / `vortex_get_task`: discover or inspect work. Unassigned open tasks are visible to configured agents; assigned tasks are visible to their creator and assignee.
 - `vortex_claim_task`: claim open work, resume your blocked task, renew your lease, or reclaim an expired in-progress lease. A task with dependencies cannot be claimed until all dependencies are complete. After a reclaim, the former assignee loses update/complete access.
 - `vortex_update_task`: report progress or a blocked reason. Blocking releases the lease; the assigned agent can resume by claiming the task again.
