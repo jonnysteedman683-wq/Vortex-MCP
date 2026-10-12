@@ -9,6 +9,12 @@ DEFAULT_AGENT_IDS = ("hermes-1", "hermes-2", "antigravity-1", "spark-1")
 AGENT_IDS = DEFAULT_AGENT_IDS
 
 
+def _agent_env_name(agent_id: str, *, prefer_client: bool) -> str:
+    suffix = agent_id.upper().replace("-", "_")
+    prefix = "VORTEX_CLIENT" if prefer_client else "VORTEX_SUBJECT"
+    return f"{prefix}_{suffix}"
+
+
 def _parse_agent_ids() -> tuple[str, ...]:
     raw = os.getenv("VORTEX_AGENT_IDS", "").strip()
     if not raw:
@@ -65,6 +71,10 @@ class Settings:
     allowed_origins: tuple[str, ...] = ()
     development_tokens: dict[str, str] | None = None
 
+    @property
+    def agent_client_ids(self) -> dict[str, str] | None:
+        return self.identity_clients
+
     @classmethod
     def from_env(cls) -> "Settings":
         mode = os.getenv("VORTEX_AUTH_MODE", "development").strip().lower()
@@ -85,6 +95,21 @@ class Settings:
                 raise RuntimeError("Development bearer tokens must be distinct per agent")
             return cls(mode, host, port, data_dir, agent_ids=agent_ids, development_tokens=tokens)
         if mode == "oauth":
+            identity_clients = {}
+            for agent in agent_ids:
+                env_name = _agent_env_name(agent, prefer_client=True)
+                legacy_name = _agent_env_name(agent, prefer_client=False)
+                client_id = os.getenv(env_name, "").strip()
+                legacy_client_id = os.getenv(legacy_name, "").strip()
+                if client_id and legacy_client_id and client_id != legacy_client_id:
+                    raise RuntimeError(
+                        f"Conflicting OAuth client mappings for {agent}: {env_name} and {legacy_name} differ"
+                    )
+                resolved_client_id = client_id or legacy_client_id
+                if resolved_client_id:
+                    identity_clients[agent] = resolved_client_id
+                else:
+                    raise RuntimeError(f"Required setting {env_name} or {legacy_name} is missing")
             return cls(
                 auth_mode="oauth",
                 host=host,
@@ -97,10 +122,7 @@ class Settings:
                 oauth_client_id=_required("VORTEX_OAUTH_CLIENT_ID"),
                 oauth_client_secret=_required("VORTEX_OAUTH_CLIENT_SECRET"),
                 oauth_ca_bundle=_optional_ca_bundle("VORTEX_OAUTH_CA_BUNDLE"),
-                identity_clients={
-                    agent: _required("VORTEX_SUBJECT_" + agent.upper().replace("-", "_"))
-                    for agent in agent_ids
-                },
+                identity_clients=identity_clients,
                 allowed_hosts=tuple(
                     h.strip()
                     for h in _required("VORTEX_ALLOWED_HOSTS").split(",")

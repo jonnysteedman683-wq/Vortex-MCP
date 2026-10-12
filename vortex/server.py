@@ -94,7 +94,7 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
             client_secret=settings.oauth_client_secret,
             issuer=settings.oauth_issuer,
             resource_url=resource_url,
-            identity_clients=settings.identity_clients,
+            agent_client_ids=settings.agent_client_ids,
             agent_ids=agent_ids,
             ca_bundle=settings.oauth_ca_bundle,
         )
@@ -141,9 +141,13 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         return store.list_agents(_identity(agent_ids))
 
     @server.tool()
-    def vortex_send_message(recipient_id: str, body: str) -> dict[str, Any]:
-        """Queue a bounded plain-text message for another configured instance."""
-        return store.send(_identity(agent_ids), recipient_id, body)
+    def vortex_send_message(
+        recipient_id: str,
+        body: str,
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue a bounded message for another instance, optionally attached to an accessible task."""
+        return store.send(_identity(agent_ids), recipient_id, body, task_id=task_id)
 
     @server.tool()
     def vortex_get_inbox(
@@ -182,6 +186,73 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         parent = next(message for message in thread if message["message_id"] == message_id)
         recipient = parent["recipient_id"] if parent["sender_id"] == sender else parent["sender_id"]
         return store.send(sender, recipient, body, reply_to=message_id)
+
+    @server.tool()
+    def vortex_create_task(
+        goal: str,
+        assigned_to: str | None = None,
+        priority: int = 3,
+        depends_on: list[str] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Create durable work; priority 1 is highest, and dependencies must complete before claim."""
+        return store.create_task(
+            _identity(agent_ids),
+            goal,
+            assigned_to=assigned_to,
+            priority=priority,
+            depends_on=depends_on,
+            idempotency_key=idempotency_key,
+        )
+
+    @server.tool()
+    def vortex_list_tasks(status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        """List tasks created by or assigned to this agent, ordered by priority."""
+        return store.list_tasks(_identity(agent_ids), status=status, limit=limit)
+
+    @server.tool()
+    def vortex_get_task(task_id: str) -> dict[str, Any]:
+        """Get a task and its dependency readiness; only the creator or assignee may read it."""
+        return store.get_task(_identity(agent_ids), task_id)
+
+    @server.tool()
+    def vortex_get_task_events(task_id: str) -> list[dict[str, Any]]:
+        """Read the append-only task lifecycle history for an accessible task."""
+        return store.task_events(_identity(agent_ids), task_id)
+
+    @server.tool()
+    def vortex_claim_task(
+        task_id: str,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """Claim eligible work, resume blocked work, or reclaim an expired lease (30-3600 seconds)."""
+        return store.claim_task(_identity(agent_ids), task_id, lease_seconds=lease_seconds)
+
+    @server.tool()
+    def vortex_update_task(
+        task_id: str,
+        status: str,
+        blocked_reason: str | None = None,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """Report in_progress (renew lease) or blocked (requires a reason) for your assigned task."""
+        return store.update_task(
+            _identity(agent_ids),
+            task_id,
+            status,
+            blocked_reason=blocked_reason,
+            lease_seconds=lease_seconds,
+        )
+
+    @server.tool()
+    def vortex_complete_task(task_id: str, result: str = "") -> dict[str, Any]:
+        """Complete an in-progress task while its lease is active, recording the result."""
+        return store.complete_task(_identity(agent_ids), task_id, result=result)
+
+    @server.tool()
+    def vortex_cancel_task(task_id: str, reason: str = "") -> dict[str, Any]:
+        """Cancel a non-terminal task as its creator or assignee."""
+        return store.cancel_task(_identity(agent_ids), task_id, reason=reason)
 
     return server
 
