@@ -30,27 +30,35 @@ class IntrospectionTokenVerifier(TokenVerifier):
         client_secret: str,
         issuer: str,
         resource_url: str,
-        identity_clients: Mapping[str, str],
+        identity_clients: Mapping[str, str] | None = None,
+        agent_client_ids: Mapping[str, str] | None = None,
         agent_ids: set[str] | tuple[str, ...] | None = None,
         timeout: float = 5.0,
         transport: httpx.AsyncBaseTransport | None = None,
         ca_bundle: str | None = None,
     ) -> None:
+        if identity_clients is None and agent_client_ids is None:
+            raise ValueError("At least one identity mapping must be supplied")
+        configured = dict(identity_clients or {})
+        if agent_client_ids is not None:
+            if configured and set(configured) != set(agent_client_ids):
+                raise ValueError("identity_clients and agent_client_ids must describe the same agent mapping")
+            configured = dict(agent_client_ids)
         for label, url in (("introspection_url", introspection_url), ("issuer", issuer), ("resource_url", resource_url)):
             parsed = urlparse(url)
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError(f"{label} must be an HTTPS URL without embedded credentials")
-        known_agents = set(agent_ids) if agent_ids is not None else set(identity_clients)
-        if set(identity_clients) != known_agents or any(not client for client in identity_clients.values()):
+        known_agents = set(agent_ids) if agent_ids is not None else set(configured)
+        if set(configured) != known_agents or any(not client for client in configured.values()):
             raise ValueError("Each configured agent must be mapped to a distinct OAuth client ID")
-        if len(set(identity_clients.values())) != len(identity_clients):
+        if len(set(configured.values())) != len(configured):
             raise ValueError("Each configured agent must have a distinct OAuth client ID")
         self.introspection_url = introspection_url
         self.client_id = client_id
         self.client_secret = client_secret
         self.issuer = issuer.rstrip("/")
         self.resource_url = resource_url.rstrip("/")
-        self.client_agents = {client_id: agent for agent, client_id in identity_clients.items()}
+        self.client_agents = {client_id: agent for agent, client_id in configured.items()}
         self.timeout = timeout
         self.transport = transport
         # Optional extra CA bundle (PEM) for introspection over an internal /

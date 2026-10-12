@@ -37,6 +37,28 @@ class ServerAuthTests(unittest.TestCase):
         self.assertTrue(server.settings.transport_security.enable_dns_rebinding_protection)
         store.close()
 
+    def test_development_server_exposes_durable_work_coordination_tools(self):
+        settings = Settings(
+            auth_mode="development", host="127.0.0.1", port=8000,
+            data_dir=".vortex-data", development_tokens={
+                "hermes-1": "a", "hermes-2": "b", "antigravity-1": "c", "spark-1": "d",
+            },
+        )
+        store = VortexStore(":memory:")
+        server = create_server(store, settings)
+        tool_names = {tool.name for tool in server._tool_manager.list_tools()}
+        self.assertTrue({
+            "vortex_create_task",
+            "vortex_list_tasks",
+            "vortex_get_task",
+            "vortex_get_task_events",
+            "vortex_claim_task",
+            "vortex_update_task",
+            "vortex_complete_task",
+            "vortex_cancel_task",
+        }.issubset(tool_names))
+        store.close()
+
     def test_development_server_uses_configured_port_for_transport_and_token_resource(self):
         settings = Settings(
             auth_mode="development", host="127.0.0.1", port=8123,

@@ -67,6 +67,26 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_ids, ("hermes-1", "hermes-2", "antigravity-1", "spark-1", "atlas-1"))
         self.assertEqual(settings.identity_clients["atlas-1"], "atlas-1")
 
+    def test_oauth_mode_accepts_client_name_aliases(self):
+        env = self.environment(
+            VORTEX_AUTH_MODE="oauth",
+            VORTEX_PUBLIC_URL="https://vortex.example.test",
+            VORTEX_OAUTH_ISSUER="https://id.example.test/realms/vortex",
+            VORTEX_OAUTH_INTROSPECTION_URL="https://id.example.test/introspect",
+            VORTEX_OAUTH_CLIENT_ID="introspector",
+            VORTEX_OAUTH_CLIENT_SECRET="secret",
+            VORTEX_CLIENT_HERMES_1="hermes-1",
+            VORTEX_CLIENT_HERMES_2="hermes-2",
+            VORTEX_CLIENT_ANTIGRAVITY_1="antigravity-1",
+            VORTEX_CLIENT_SPARK_1="spark-1",
+            VORTEX_ALLOWED_HOSTS="vortex.example.test",
+            VORTEX_ALLOWED_ORIGINS="https://vortex.example.test",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.agent_client_ids["hermes-1"], "hermes-1")
+        self.assertEqual(settings.identity_clients["hermes-1"], "hermes-1")
+
     def test_ca_bundle_must_exist_when_set(self):
         env = self.environment(
             VORTEX_AUTH_MODE="oauth",

@@ -19,7 +19,7 @@ MCP tools alone do not wake an inactive agent. Vortex messages are queued and de
 
 ## Development
 
-To add more configured agent connections, set `VORTEX_AGENT_IDS` to a comma-separated list such as `hermes-1,hermes-2,antigravity-1,spark-1,oracle-1`. The server then requires matching `VORTEX_TOKEN_<AGENT>` and `VORTEX_SUBJECT_<AGENT>` values for every configured identity.
+To add more configured agent connections, set `VORTEX_AGENT_IDS` to a comma-separated list such as `hermes-1,hermes-2,antigravity-1,spark-1,oracle-1`. The server then requires matching `VORTEX_TOKEN_<AGENT>` and OAuth client mapping values for every configured identity. Preferred config names are `VORTEX_CLIENT_<AGENT>`; legacy `VORTEX_SUBJECT_<AGENT>` values still work for compatibility.
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
@@ -36,14 +36,14 @@ Set `VORTEX_AUTH_MODE=oauth` plus the `VORTEX_OAUTH_*` block in `.env.example`. 
 
 - `VORTEX_PUBLIC_URL` must be HTTPS without credentials. It sets both the OAuth audience and the MCP `resource_url`, so it must match exactly how clients reach the server.
 - `VORTEX_ALLOWED_HOSTS` / `VORTEX_ALLOWED_ORIGINS` are matched against the `Host` and `Origin` headers. The MCP transport matches the `Host` value **exactly including the port**, or via a `:*` wildcard (`localhost:*`). A bare `localhost` will not match `Host: localhost:8000`.
-- `VORTEX_SUBJECT_<AGENT>` maps each Keycloak client to its Vortex identity, e.g. `VORTEX_SUBJECT_HERMES_1=hermes-1`.
+- `VORTEX_CLIENT_<AGENT>` maps each Keycloak client to its Vortex identity, e.g. `VORTEX_CLIENT_HERMES_1=hermes-1`. The legacy `VORTEX_SUBJECT_<AGENT>` name is still accepted for compatibility.
 - `VORTEX_OAUTH_CA_BUNDLE` optionally names a PEM bundle that augments the system trust store. Needed when the identity provider uses an internal or Tailscale-signed certificate that `httpx` does not trust by default; startup fails if the path does not exist.
 
 ## First-slice tools
 
 - `vortex_register_agent`: validate/register one of the four configured instance identities and refresh its presence.
 - `vortex_list_agents`: list connection/presence metadata (no credentials).
-- `vortex_send_message`: send a bounded message to one instance; use reply tool for threads.
+- `vortex_send_message`: send a bounded message to one instance; optionally include `task_id` to attach it to a task visible to both sender and recipient.
 - `vortex_get_inbox`: read pending messages addressed to the authenticated instance, with stable cursor pagination (`after_message_id`) and optional acknowledged-message history.
 - `vortex_ack_message`: acknowledge delivery/read of an inbox message.
 - `vortex_ack_messages`: atomically acknowledge 1-100 inbox messages; the whole batch is rejected if any message is missing or belongs to another instance.
@@ -51,5 +51,18 @@ Set `VORTEX_AUTH_MODE=oauth` plus the `VORTEX_OAUTH_*` block in `.env.example`. 
 - `vortex_reply_message`: send a threaded reply to a message's sender.
 
 Inbox pages are ordered by creation time and message ID. To fetch the next page, pass the last message's `message_id` as `after_message_id`; cursors are scoped to the authenticated recipient.
+
+## Durable work coordination
+
+Work items are separate from messages: they have a goal, creator, optional assignee, priority (1 is highest), dependencies, status, lease, result, and lifecycle event history. SQLite persists tasks and events across server restarts.
+
+- `vortex_create_task`: create work, optionally assign it, attach up to 20 dependencies, and provide an idempotency key for safe retries. Reusing a key with different task details is rejected.
+- `vortex_list_tasks` / `vortex_get_task`: discover or inspect work. Unassigned open tasks are visible to configured agents; assigned tasks are visible to their creator and assignee.
+- `vortex_claim_task`: claim open work, resume your blocked task, renew your lease, or reclaim an expired in-progress lease. A task with dependencies cannot be claimed until all dependencies are complete. After a reclaim, the former assignee loses update/complete access.
+- `vortex_update_task`: report progress or a blocked reason. Blocking releases the lease; the assigned agent can resume by claiming the task again.
+- `vortex_complete_task` / `vortex_cancel_task`: record a result or stop non-terminal work. Completion requires an active lease; cancellation is allowed to the creator or assignee.
+- `vortex_get_task_events`: inspect task lifecycle history.
+
+Leases are time-bounded (30–3600 seconds, default 300). They provide recoverable ownership, not exactly-once execution: external side effects must still be idempotent. Task event records are persisted for auditability, and task-linked messages appear in inbox/thread records with their `task_id`. This initial slice does not yet implement event-stream push, retention/cleanup, cross-project access scopes, or official MCP Tasks extension negotiation. Until those are implemented, clients should poll task state and use the existing inbox for messages.
 
 The implementation intentionally does not execute shell commands, read/write arbitrary files, or claim to dispatch work into idle agents. Individual MCP clients authenticate as distinct Vortex identities.
