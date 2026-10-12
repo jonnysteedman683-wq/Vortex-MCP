@@ -128,6 +128,24 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.store.thread("antigravity-1", message["message_id"])
 
+    def test_mass_dispatch_creates_one_task_per_recipient(self):
+        tasks = self.store.dispatch_tasks(
+            "hermes-1",
+            "Prepare launch brief",
+            ["spark-1", "hermes-2"],
+            priority=2,
+        )
+        self.assertEqual([task["assigned_to"] for task in tasks], ["spark-1", "hermes-2"])
+        self.assertEqual([task["goal"] for task in tasks], ["Prepare launch brief", "Prepare launch brief"])
+        self.assertEqual(len(self.store.list_tasks("hermes-1")), 2)
+
+        with self.assertRaisesRegex(ValueError, "at least one recipient"):
+            self.store.dispatch_tasks("hermes-1", "Invalid batch", [])
+        before = len(self.store.list_tasks("hermes-1"))
+        with self.assertRaisesRegex(ValueError, "Unknown recipient agent identity"):
+            self.store.dispatch_tasks("hermes-1", "Invalid batch", ["spark-1", "rogue"])
+        self.assertEqual(len(self.store.list_tasks("hermes-1")), before)
+
     def test_task_creation_is_idempotent_and_rejects_key_reuse(self):
         task = self.store.create_task(
             "hermes-1", "  Review MCP task support  ", assigned_to="spark-1",

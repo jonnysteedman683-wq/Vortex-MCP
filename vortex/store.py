@@ -298,6 +298,52 @@ class VortexStore:
                 self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
             )
 
+    def dispatch_tasks(
+        self,
+        creator_id: str,
+        goal: str,
+        recipients: list[str],
+        priority: int = 3,
+        depends_on: list[str] | None = None,
+        idempotency_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(recipients, list) or not recipients:
+            raise ValueError("Provide at least one recipient for mass dispatch")
+        if len(recipients) > 100:
+            raise ValueError("Provide no more than 100 recipients in one mass dispatch")
+        if any(not isinstance(recipient, str) or not recipient.strip() for recipient in recipients):
+            raise ValueError("Recipients must be non-empty agent IDs")
+        if len(set(recipients)) != len(recipients):
+            raise ValueError("Recipients must not contain duplicates")
+
+        dispatched: list[dict[str, Any]] = []
+        base_key = idempotency_key.strip() if isinstance(idempotency_key, str) and idempotency_key.strip() else None
+        effective_keys = {
+            recipient: f"{base_key}:{recipient}" if base_key else None
+            for recipient in recipients
+        }
+
+        with self._lock, self._db:
+            if self._get_agent(self._db, creator_id) is None:
+                raise ValueError("Unknown task creator")
+            for recipient in recipients:
+                if self._get_agent(self._db, recipient) is None:
+                    raise ValueError(f"Unknown recipient agent identity: {recipient}")
+            for dependency_id in depends_on or []:
+                self._task_access(creator_id, dependency_id)
+            for recipient in recipients:
+                dispatched.append(
+                    self.create_task(
+                        creator_id,
+                        goal,
+                        assigned_to=recipient,
+                        priority=priority,
+                        depends_on=depends_on,
+                        idempotency_key=effective_keys[recipient],
+                    )
+                )
+        return dispatched
+
     def list_tasks(
         self,
         agent_id: str,
