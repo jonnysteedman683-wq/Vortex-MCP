@@ -16,6 +16,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .auth import IntrospectionTokenVerifier
 from .settings import AGENT_IDS, Settings
+from .spine import advisory_task_goals, survey_organs
 from .store import VortexStore
 
 load_dotenv()
@@ -272,7 +273,62 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         """Cancel a non-terminal task as its creator or assignee."""
         return store.cancel_task(_identity(agent_ids), task_id, reason=reason)
 
+    @server.tool()
+    def vortex_spine_survey(registry_path: str | None = None) -> dict[str, Any]:
+        """Read validated organ status from the configured SPINE registry; returns no filesystem paths."""
+        _identity(agent_ids)
+        rows, fingerprint = survey_organs(registry_path)
+        return {"organs": rows, "count": len(rows), "registry_sha256": fingerprint}
+
+    @server.tool()
+    def vortex_spine_plan(
+        registry_path: str | None = None,
+        create_tasks: bool = False,
+    ) -> dict[str, Any]:
+        """Preview read-only SPINE advisory tasks; create bounded local records only when explicitly opted in."""
+        creator_id = _identity(agent_ids)
+        rows, fingerprint = survey_organs(registry_path)
+        goals = advisory_task_goals(rows)
+        if not create_tasks:
+            return {
+                "organs": rows,
+                "registry_sha256": fingerprint,
+                "tasks_created": False,
+                "planned_tasks": [{"organ_id": organ_id, "goal": goal} for organ_id, goal in goals],
+            }
+        tasks = []
+        for organ_id, goal in goals:
+            assignee_id = _spine_assignee(organ_id, agent_ids)
+            task = store.create_task(
+                creator_id,
+                goal,
+                assigned_to=assignee_id,
+                priority=3,
+                idempotency_key=f"spine:{fingerprint}:{organ_id}",
+            )
+            tasks.append({"organ_id": organ_id, "task_id": task["task_id"], "assigned_to": task["assigned_to"]})
+        return {
+            "organs": rows,
+            "registry_sha256": fingerprint,
+            "tasks_created": True,
+            "tasks": tasks,
+        }
+
     return server
+
+
+def _spine_assignee(organ_id: str, agent_ids: tuple[str, ...] | set[str]) -> str:
+    preferred = {
+        "citadel": "hermes-2",
+        "o0": "hermes-2",
+        "markus": "antigravity-1",
+        "horizontal": "antigravity-1",
+        "vorpal": "spark-1",
+        "aih": "spark-1",
+        "vortex-desktop": "hermes-1",
+        "hermes": "hermes-1",
+    }.get(organ_id, "hermes-2")
+    return preferred if preferred in agent_ids else sorted(agent_ids)[0]
 
 
 def run() -> None:

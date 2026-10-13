@@ -56,6 +56,8 @@ class ServerAuthTests(unittest.TestCase):
             "vortex_update_task",
             "vortex_complete_task",
             "vortex_cancel_task",
+            "vortex_spine_survey",
+            "vortex_spine_plan",
         }.issubset(tool_names))
         store.close()
 

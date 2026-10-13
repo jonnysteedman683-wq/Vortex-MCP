@@ -66,4 +66,13 @@ Work items are separate from messages: they have a goal, creator, optional assig
 
 Leases are time-bounded (30–3600 seconds, default 300). They provide recoverable ownership, not exactly-once execution: external side effects must still be idempotent. Task event records are persisted for auditability, and task-linked messages appear in inbox/thread records with their `task_id`. This initial slice does not yet implement event-stream push, retention/cleanup, cross-project access scopes, or official MCP Tasks extension negotiation. Until those are implemented, clients should poll task state and use the existing inbox for messages.
 
+## SPINE organ health survey
+
+SPINE adds two authenticated, local-only tools:
+
+- `vortex_spine_survey`: validate and classify entries in an operator-configured JSON registry; returns organ ID, role, status, canon flag, and a SHA-256 registry fingerprint, never filesystem paths.
+- `vortex_spine_plan`: preview bounded read-only advisory tasks. It creates local SQLite task records only when `create_tasks=true`; each record is attributed to the authenticated creator and assigned to one of the configured agent identities. Idempotency keys prevent duplicate records for the same registry snapshot. Creating records does not wake or remotely dispatch agents.
+
+Before enabling these tools, configure `VORTEX_SPINE_REGISTRY` to an absolute path for a JSON file with an `organs` list, and `VORTEX_SPINE_ORGAN_ROOTS` to one or more absolute, existing roots separated by the platform path separator. Each organ entry accepts only `id`, `role`, `expected` (`present` or `absent`), `path`, optional `canon` (`yes`, `no`, or `undecided`), and optional relative `sentinel`. Organ paths and sentinel checks are limited to those roots; symlinks/junctions, traversal, secret-named path components, oversized registries, extra schema fields, and invalid entries are rejected. Survey results and task goals omit local paths. With either setting missing, SPINE tools fail closed. No paths or file contents are written into task records.
+
 The implementation intentionally does not execute shell commands, read/write arbitrary files, or claim to dispatch work into idle agents. Individual MCP clients authenticate as distinct Vortex identities.
