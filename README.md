@@ -31,6 +31,25 @@ Identities listed in `VORTEX_OPERATOR_IDS` get fleet-wide oversight; everyone el
 
 Example: add `claude-operator` to `VORTEX_AGENT_IDS`, set `VORTEX_TOKEN_CLAUDE_OPERATOR`, and set `VORTEX_OPERATOR_IDS=claude-operator`.
 
+### Approval gate
+
+A task that requires approval is created with `approval_state: "pending"` and cannot be claimed by anyone until an operator decides. Approval makes it claimable; rejection cancels it permanently. Every decision is an audited task event.
+
+A task requires approval when either:
+
+- its creator passes `requires_approval=true` to `vortex_create_task` or `vortex_dispatch_tasks`, or
+- server policy `VORTEX_APPROVAL_REQUIRED_FOR` matches: `*` gates every task, or a list of agent IDs gates tasks assigned to them. Creators cannot opt out of policy. A list does not gate unassigned tasks; use `*` for that.
+
+Policy requires at least one operator (startup fails closed otherwise). Existing databases migrate in place; tasks created before the upgrade need no approval.
+
+| Tool | Purpose |
+|---|---|
+| `vortex_operator_list_pending_approvals` | Open tasks awaiting a decision, by priority then age |
+| `vortex_operator_approve_task` | Make a pending task claimable; optional note |
+| `vortex_operator_reject_task` | Cancel a pending task permanently; reason required |
+
+`vortex_operator_overview` also reports `pending_approvals`.
+
 ## Development
 
 To add more configured agent connections, set `VORTEX_AGENT_IDS` to a comma-separated list such as `hermes-1,hermes-2,antigravity-1,spark-1,oracle-1`. The server then requires matching `VORTEX_TOKEN_<AGENT>` and OAuth client mapping values for every configured identity. Preferred config names are `VORTEX_CLIENT_<AGENT>`; legacy `VORTEX_SUBJECT_<AGENT>` values still work for compatibility.

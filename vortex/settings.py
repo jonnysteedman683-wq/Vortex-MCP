@@ -46,6 +46,24 @@ def _parse_operator_ids(agent_ids: tuple[str, ...]) -> tuple[str, ...]:
     return ids
 
 
+def _parse_approval_policy(agent_ids: tuple[str, ...]) -> tuple[str, ...]:
+    """'*' gates every task; agent IDs gate tasks assigned to them. Empty by default."""
+    raw = os.getenv("VORTEX_APPROVAL_REQUIRED_FOR", "").strip()
+    if not raw:
+        return ()
+    entries = tuple(part.strip() for part in raw.split(",") if part.strip())
+    if len(set(entries)) != len(entries):
+        raise RuntimeError("VORTEX_APPROVAL_REQUIRED_FOR must not contain duplicates")
+    if "*" in entries and len(entries) > 1:
+        raise RuntimeError("VORTEX_APPROVAL_REQUIRED_FOR='*' must not be combined with agent IDs")
+    unknown = [entry for entry in entries if entry != "*" and entry not in agent_ids]
+    if unknown:
+        raise RuntimeError(
+            "VORTEX_APPROVAL_REQUIRED_FOR must name configured agent IDs or '*'; unknown: " + ", ".join(unknown)
+        )
+    return entries
+
+
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -90,6 +108,7 @@ class Settings:
     allowed_origins: tuple[str, ...] = ()
     development_tokens: dict[str, str] | None = None
     operator_ids: tuple[str, ...] = ()
+    approval_required_for: tuple[str, ...] = ()
 
     @property
     def agent_client_ids(self) -> dict[str, str] | None:
@@ -103,6 +122,11 @@ class Settings:
         data_dir = os.getenv("VORTEX_DATA_DIR", ".vortex-data")
         agent_ids = _parse_agent_ids()
         operator_ids = _parse_operator_ids(agent_ids)
+        approval_required_for = _parse_approval_policy(agent_ids)
+        if approval_required_for and not operator_ids:
+            raise RuntimeError(
+                "VORTEX_APPROVAL_REQUIRED_FOR needs at least one VORTEX_OPERATOR_IDS entry to approve tasks"
+            )
         if not 1 <= port <= 65535:
             raise RuntimeError("VORTEX_PORT must be between 1 and 65535")
         if mode == "development":
@@ -117,6 +141,7 @@ class Settings:
             return cls(
                 mode, host, port, data_dir,
                 agent_ids=agent_ids, development_tokens=tokens, operator_ids=operator_ids,
+                approval_required_for=approval_required_for,
             )
         if mode == "oauth":
             identity_clients = {}
@@ -148,6 +173,7 @@ class Settings:
                 oauth_ca_bundle=_optional_ca_bundle("VORTEX_OAUTH_CA_BUNDLE"),
                 identity_clients=identity_clients,
                 operator_ids=operator_ids,
+                approval_required_for=approval_required_for,
                 allowed_hosts=tuple(
                     h.strip()
                     for h in _required("VORTEX_ALLOWED_HOSTS").split(",")

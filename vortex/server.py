@@ -78,7 +78,18 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
     unknown_operators = [agent for agent in operator_ids if agent not in agent_ids]
     if unknown_operators:
         raise RuntimeError("Operator IDs must be configured agent IDs: " + ", ".join(unknown_operators))
-    store = store or VortexStore(os.path.join(settings.data_dir, "vortex.sqlite3"), agents={agent: agent for agent in agent_ids})
+    approval_policy = tuple(settings.approval_required_for)
+    unknown_policy = [entry for entry in approval_policy if entry != "*" and entry not in agent_ids]
+    if unknown_policy:
+        raise RuntimeError("Approval policy must name configured agent IDs or '*': " + ", ".join(unknown_policy))
+    if store is None:
+        store = VortexStore(
+            os.path.join(settings.data_dir, "vortex.sqlite3"),
+            agents={agent: agent for agent in agent_ids},
+            approval_required_for=approval_policy,
+        )
+    else:
+        store.set_approval_policy(approval_policy)
 
     if settings.auth_mode == "development":
         issuer_url = _loopback_url(settings.host, settings.port)
@@ -206,8 +217,11 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         priority: int = 3,
         depends_on: list[str] | None = None,
         idempotency_key: str | None = None,
+        requires_approval: bool = False,
     ) -> dict[str, Any]:
-        """Create durable work; priority 1 is highest, and dependencies must complete before claim."""
+        """Create durable work; priority 1 is highest, and dependencies must complete before claim.
+        Set requires_approval for risky work: it stays unclaimable until an operator approves it
+        (server policy may also require approval regardless of this flag)."""
         return store.create_task(
             _identity(agent_ids),
             goal,
@@ -215,6 +229,7 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
             priority=priority,
             depends_on=depends_on,
             idempotency_key=idempotency_key,
+            requires_approval=requires_approval,
         )
 
     @server.tool()
@@ -224,8 +239,9 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         priority: int = 3,
         depends_on: list[str] | None = None,
         idempotency_key: str | None = None,
+        requires_approval: bool = False,
     ) -> list[dict[str, Any]]:
-        """Create one durable task per recipient in a single atomic batch."""
+        """Create one durable task per recipient in a single atomic batch; requires_approval gates each."""
         return store.dispatch_tasks(
             _identity(agent_ids),
             goal,
@@ -233,6 +249,7 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
             priority=priority,
             depends_on=depends_on,
             idempotency_key=idempotency_key,
+            requires_approval=requires_approval,
         )
 
     @server.tool()
@@ -359,6 +376,21 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         return store.operator_events(
             _operator(agent_ids, operator_ids), after_event_id=after_event_id, limit=limit
         )
+
+    @server.tool()
+    def vortex_operator_list_pending_approvals(limit: int = 50) -> list[dict[str, Any]]:
+        """Operator only: open tasks awaiting an approval decision, highest priority and oldest first."""
+        return store.operator_list_pending_approvals(_operator(agent_ids, operator_ids), limit=limit)
+
+    @server.tool()
+    def vortex_operator_approve_task(task_id: str, note: str = "") -> dict[str, Any]:
+        """Operator only: approve a pending task so it becomes claimable; the decision is audited."""
+        return store.operator_approve_task(_operator(agent_ids, operator_ids), task_id, note=note)
+
+    @server.tool()
+    def vortex_operator_reject_task(task_id: str, reason: str) -> dict[str, Any]:
+        """Operator only: reject a pending task; it is cancelled permanently. A reason is required."""
+        return store.operator_reject_task(_operator(agent_ids, operator_ids), task_id, reason)
 
     return server
 

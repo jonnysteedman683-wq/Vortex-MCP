@@ -38,6 +38,8 @@ def iso(value: datetime) -> str:
 
 
 TASK_STATUSES = ("open", "in_progress", "blocked", "completed", "cancelled")
+CLAIMABLE_APPROVAL_STATES = ("not_required", "approved")
+MAX_APPROVAL_NOTE_CHARS = 1000
 
 
 def _platform_for(agent_id: str) -> str:
@@ -54,11 +56,17 @@ def _platform_for(agent_id: str) -> str:
 class VortexStore:
     """Synchronous, thread-safe SQLite store; no message body is written to logs."""
 
-    def __init__(self, path: str | Path, agents: dict[str, str] | None = None):
+    def __init__(
+        self,
+        path: str | Path,
+        agents: dict[str, str] | None = None,
+        approval_required_for: tuple[str, ...] | list[str] | None = None,
+    ):
         self.path = str(path)
         self._agents = dict(DEFAULT_AGENTS)
         if agents:
             self._agents.update(agents)
+        self.set_approval_policy(approval_required_for)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -146,6 +154,20 @@ class VortexStore:
                     "ALTER TABLE messages ADD COLUMN task_id TEXT REFERENCES tasks(task_id)"
                 )
             self._db.execute("CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id)")
+            task_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "approval_state" not in task_columns:
+                # Additive migration: existing tasks stay claimable ('not_required').
+                self._db.execute(
+                    """
+                    ALTER TABLE tasks ADD COLUMN approval_state TEXT NOT NULL DEFAULT 'not_required'
+                        CHECK(approval_state IN ('not_required','pending','approved','rejected'))
+                    """
+                )
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_approval ON tasks(approval_state, created_at)"
+            )
             for agent_id, display_name in self._agents.items():
                 platform = _platform_for(agent_id)
                 self._db.execute(
@@ -195,8 +217,26 @@ class VortexStore:
                 (task["task_id"],),
             ).fetchall()
         ]
-        task["ready"] = task["status"] == "open" and not task["blocked_by"]
+        task["awaiting_approval"] = task["approval_state"] == "pending"
+        task["ready"] = (
+            task["status"] == "open"
+            and not task["blocked_by"]
+            and task["approval_state"] in CLAIMABLE_APPROVAL_STATES
+        )
         return task
+
+    # --- Approval policy -----------------------------------------------------
+
+    def set_approval_policy(self, approval_required_for: tuple[str, ...] | list[str] | None) -> None:
+        """'*' gates every task; agent IDs gate tasks assigned to them; empty gates nothing."""
+        entries = tuple(approval_required_for or ())
+        self._approval_all = "*" in entries
+        self._approval_assignees = frozenset(entry for entry in entries if entry != "*")
+
+    def _approval_required(self, assigned_to: str | None, requested: bool) -> bool:
+        if requested or self._approval_all:
+            return True
+        return assigned_to is not None and assigned_to in self._approval_assignees
 
     def _task_event(
         self,
@@ -219,7 +259,11 @@ class VortexStore:
         priority: int = 3,
         depends_on: list[str] | None = None,
         idempotency_key: str | None = None,
+        requires_approval: bool = False,
     ) -> dict[str, Any]:
+        if not isinstance(requires_approval, bool):
+            raise ValueError("requires_approval must be a boolean")
+        needs_approval = self._approval_required(assigned_to, requires_approval)
         if not isinstance(goal, str):
             raise ValueError("Task goal must be a string")
         goal = goal.strip()
@@ -264,6 +308,7 @@ class VortexStore:
                         or existing["assigned_to"] != assigned_to
                         or existing["priority"] != priority
                         or existing_view["depends_on"] != sorted(dependencies)
+                        or (existing["approval_state"] != "not_required") != needs_approval
                     ):
                         raise ValueError("Idempotency key was already used for a different task")
                     return existing_view
@@ -273,10 +318,14 @@ class VortexStore:
             cursor = self._db.execute(
                 """
                 INSERT OR IGNORE INTO tasks(
-                    task_id,goal,created_by,assigned_to,priority,created_at,updated_at,idempotency_key
-                ) VALUES(?,?,?,?,?,?,?,?)
+                    task_id,goal,created_by,assigned_to,priority,created_at,updated_at,idempotency_key,
+                    approval_state
+                ) VALUES(?,?,?,?,?,?,?,?,?)
                 """,
-                (task_id, goal, creator_id, assigned_to, priority, created_at, created_at, idempotency_key),
+                (
+                    task_id, goal, creator_id, assigned_to, priority, created_at, created_at,
+                    idempotency_key, "pending" if needs_approval else "not_required",
+                ),
             )
             if cursor.rowcount != 1:
                 existing = self._db.execute(
@@ -291,6 +340,7 @@ class VortexStore:
                     or existing["assigned_to"] != assigned_to
                     or existing["priority"] != priority
                     or existing_view["depends_on"] != sorted(dependencies)
+                    or (existing["approval_state"] != "not_required") != needs_approval
                 ):
                     raise ValueError("Idempotency key was already used for a different task")
                 return existing_view
@@ -303,7 +353,12 @@ class VortexStore:
                 task_id,
                 creator_id,
                 "created",
-                {"assigned_to": assigned_to, "depends_on": sorted(dependencies), "priority": priority},
+                {
+                    "assigned_to": assigned_to,
+                    "depends_on": sorted(dependencies),
+                    "priority": priority,
+                    "requires_approval": needs_approval,
+                },
                 created_at,
             )
             return self._task_view(
@@ -318,6 +373,7 @@ class VortexStore:
         priority: int = 3,
         depends_on: list[str] | None = None,
         idempotency_key: str | None = None,
+        requires_approval: bool = False,
     ) -> list[dict[str, Any]]:
         if not isinstance(recipients, list) or not recipients:
             raise ValueError("Provide at least one recipient for mass dispatch")
@@ -352,6 +408,7 @@ class VortexStore:
                         priority=priority,
                         depends_on=depends_on,
                         idempotency_key=effective_keys[recipient],
+                        requires_approval=requires_approval,
                     )
                 )
         return dispatched
@@ -421,6 +478,10 @@ class VortexStore:
                 or row["lease_expires_at"] > now_text
             ):
                 raise PermissionError("Task is assigned to another agent with an active lease")
+            if row["approval_state"] == "pending":
+                raise PermissionError("Task is awaiting operator approval and cannot be claimed yet")
+            if row["approval_state"] not in CLAIMABLE_APPROVAL_STATES:
+                raise PermissionError(f"Task approval state is {row['approval_state']}; it cannot be claimed")
             blocked_by = self._db.execute(
                 """
                 SELECT d.depends_on FROM task_dependencies d
@@ -436,6 +497,7 @@ class VortexStore:
                 """
                 UPDATE tasks SET assigned_to=?,status='in_progress',lease_expires_at=?,updated_at=?,blocked_reason=NULL
                 WHERE task_id=? AND status IN ('open','in_progress','blocked')
+                  AND approval_state IN ('not_required','approved')
                   AND (assigned_to IS NULL OR assigned_to=? OR
                        (status='in_progress' AND lease_expires_at <= ?))
                   AND (status='open' OR assigned_to=? OR lease_expires_at <= ?)
@@ -776,6 +838,9 @@ class VortexStore:
             unread = self._db.execute(
                 "SELECT recipient_id, COUNT(*) AS n FROM messages WHERE acked_at IS NULL GROUP BY recipient_id"
             ).fetchall()
+            pending_approvals = self._db.execute(
+                "SELECT COUNT(*) AS n FROM tasks WHERE approval_state='pending' AND status='open'"
+            ).fetchone()["n"]
         counts = {status: 0 for status in TASK_STATUSES}
         counts.update({row["status"]: row["n"] for row in status_rows})
         active_by_agent: dict[str, dict[str, int]] = {}
@@ -791,6 +856,7 @@ class VortexStore:
             "agents": agents,
             "task_counts": counts,
             "expired_leases": expired,
+            "pending_approvals": pending_approvals,
         }
 
     def operator_list_tasks(
@@ -902,6 +968,77 @@ class VortexStore:
         for event in events:
             event["details"] = json.loads(event.pop("details_json"))
         return events
+
+    def operator_list_pending_approvals(self, operator_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Open tasks waiting on an operator decision, highest priority and oldest first."""
+        limit = max(1, min(int(limit), 200))
+        with self._lock:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            rows = self._db.execute(
+                """
+                SELECT * FROM tasks WHERE approval_state='pending' AND status='open'
+                ORDER BY priority,created_at,task_id LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [self._task_view(row) for row in rows]
+
+    def _decide_approval(
+        self, operator_id: str, task_id: str, approve: bool, note: str
+    ) -> dict[str, Any]:
+        if not isinstance(note, str) or len(note) > MAX_APPROVAL_NOTE_CHARS:
+            raise ValueError(f"Approval note must be a string of at most {MAX_APPROVAL_NOTE_CHARS} characters")
+        note = note.strip()
+        if not approve and not note:
+            raise ValueError("Rejecting a task requires a non-empty reason")
+        with self._lock, self._db:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            row = self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError("Task not found")
+            if row["approval_state"] != "pending":
+                raise ValueError(f"Task is not awaiting approval (approval state: {row['approval_state']})")
+            if row["status"] != "open":
+                raise ValueError(f"Task cannot be decided while status is {row['status']}")
+            now_text = iso(utc_now())
+            if approve:
+                cursor = self._db.execute(
+                    """
+                    UPDATE tasks SET approval_state='approved',updated_at=?
+                    WHERE task_id=? AND approval_state='pending' AND status='open'
+                    """,
+                    (now_text, task_id),
+                )
+            else:
+                cursor = self._db.execute(
+                    """
+                    UPDATE tasks SET approval_state='rejected',status='cancelled',updated_at=?
+                    WHERE task_id=? AND approval_state='pending' AND status='open'
+                    """,
+                    (now_text, task_id),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError("Task approval was decided concurrently")
+            self._task_event(
+                task_id,
+                operator_id,
+                "approved" if approve else "rejected",
+                {"note": note} if approve else {"reason": note},
+                now_text,
+            )
+            return self._task_view(
+                self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            )
+
+    def operator_approve_task(self, operator_id: str, task_id: str, note: str = "") -> dict[str, Any]:
+        """Release a pending task so its assignee (or any agent, if unassigned) can claim it."""
+        return self._decide_approval(operator_id, task_id, approve=True, note=note)
+
+    def operator_reject_task(self, operator_id: str, task_id: str, reason: str) -> dict[str, Any]:
+        """Refuse a pending task: it is cancelled and can never be claimed; reason required."""
+        return self._decide_approval(operator_id, task_id, approve=False, note=reason)
 
     def close(self) -> None:
         with self._lock:
