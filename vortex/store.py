@@ -677,33 +677,30 @@ class VortexStore:
         if len(set(message_ids)) != len(message_ids):
             raise ValueError("Message IDs must not contain duplicates")
 
+        placeholders = ", ".join("?" for _ in message_ids)
         with self._lock, self._db:
-            rows = []
-            for message_id in message_ids:
-                row = self._db.execute(
-                    "SELECT * FROM messages WHERE message_id=?", (message_id,)
-                ).fetchone()
-                if row is None:
-                    raise ValueError("Message not found")
+            rows = self._db.execute(
+                f"SELECT * FROM messages WHERE message_id IN ({placeholders})",
+                tuple(message_ids),
+            ).fetchall()
+            if len(rows) != len(message_ids):
+                raise ValueError("Message not found")
+            for row in rows:
                 if row["recipient_id"] != agent_id:
                     raise PermissionError("Only the addressed recipient can acknowledge a message")
-                rows.append(row)
 
             acked_at = iso(utc_now())
-            for row in rows:
-                if row["acked_at"] is None:
-                    self._db.execute(
-                        "UPDATE messages SET acked_at=? WHERE message_id=?",
-                        (acked_at, row["message_id"]),
-                    )
+            self._db.execute(
+                f"UPDATE messages SET acked_at = ? WHERE message_id IN ({placeholders}) AND acked_at IS NULL",
+                (acked_at, *message_ids),
+            )
 
-            acknowledged = []
-            for message_id in message_ids:
-                row = self._db.execute(
-                    "SELECT * FROM messages WHERE message_id=?", (message_id,)
-                ).fetchone()
-                acknowledged.append(dict(row))
-        return acknowledged
+            rows = self._db.execute(
+                f"SELECT * FROM messages WHERE message_id IN ({placeholders})",
+                tuple(message_ids),
+            ).fetchall()
+            by_message_id = {row["message_id"]: dict(row) for row in rows}
+            return [by_message_id[message_id] for message_id in message_ids]
 
     def acknowledge(self, agent_id: str, message_id: str) -> dict[str, Any]:
         with self._lock, self._db:
@@ -719,13 +716,21 @@ class VortexStore:
             result["acked_at"] = acked_at
             return result
 
-    def thread(self, agent_id: str, message_id: str) -> list[dict[str, Any]]:
+    def message_context(self, agent_id: str, message_id: str) -> dict[str, Any]:
         with self._lock:
-            message = self._db.execute("SELECT thread_id,sender_id,recipient_id FROM messages WHERE message_id=?", (message_id,)).fetchone()
-            if message is None:
-                raise ValueError("Message not found")
-            if agent_id not in (message["sender_id"], message["recipient_id"]):
-                raise PermissionError("Only participants can read this thread")
+            row = self._db.execute(
+                "SELECT thread_id,sender_id,recipient_id FROM messages WHERE message_id=?",
+                (message_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Message not found")
+        if agent_id not in (row["sender_id"], row["recipient_id"]):
+            raise PermissionError("Only participants can read this thread")
+        return dict(row)
+
+    def thread(self, agent_id: str, message_id: str) -> list[dict[str, Any]]:
+        message = self.message_context(agent_id, message_id)
+        with self._lock:
             rows = self._db.execute("SELECT * FROM messages WHERE thread_id=? ORDER BY created_at", (message["thread_id"],)).fetchall()
         return [dict(row) for row in rows]
 
