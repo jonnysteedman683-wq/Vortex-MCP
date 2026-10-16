@@ -64,9 +64,21 @@ def _identity(agent_ids: tuple[str, ...] | set[str]) -> str:
     return access.client_id
 
 
+def _operator(agent_ids: tuple[str, ...] | set[str], operator_ids: tuple[str, ...] | set[str]) -> str:
+    """Resolve the token identity and require it to be a configured operator."""
+    agent_id = _identity(agent_ids)
+    if agent_id not in operator_ids:
+        raise PermissionError("Operator privileges required; this identity is not in VORTEX_OPERATOR_IDS")
+    return agent_id
+
+
 def create_server(store: VortexStore | None = None, settings: Settings | None = None) -> FastMCP:
     settings = settings or Settings.from_env()
     agent_ids = settings.agent_ids or AGENT_IDS
+    operator_ids = tuple(settings.operator_ids)
+    unknown_operators = [agent for agent in operator_ids if agent not in agent_ids]
+    if unknown_operators:
+        raise RuntimeError("Operator IDs must be configured agent IDs: " + ", ".join(unknown_operators))
     store = store or VortexStore(os.path.join(settings.data_dir, "vortex.sqlite3"), agents={agent: agent for agent in agent_ids})
 
     if settings.auth_mode == "development":
@@ -120,6 +132,7 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
             "Agent identity is derived from a validated token, never a tool argument. "
             "Messages are queued for polling and cannot wake an inactive agent. Configured instances: "
             + ", ".join(agent_ids)
+            + ". vortex_operator_* tools work only for identities listed in VORTEX_OPERATOR_IDS."
         ),
         token_verifier=verifier,
         auth=auth,
@@ -313,6 +326,41 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
             "tasks_created": True,
             "tasks": tasks,
         }
+
+    # --- Operator oversight: fleet-wide read and control ---------------------
+
+    @server.tool()
+    def vortex_operator_overview() -> dict[str, Any]:
+        """Operator only: fleet snapshot with agent presence, active work, unread counts and expired leases."""
+        return store.operator_overview(_operator(agent_ids, operator_ids))
+
+    @server.tool()
+    def vortex_operator_list_tasks(
+        status: str | None = None,
+        assigned_to: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Operator only: list any task in the fleet, filtered by status and/or assignee (max 200)."""
+        return store.operator_list_tasks(
+            _operator(agent_ids, operator_ids), status=status, assigned_to=assigned_to, limit=limit
+        )
+
+    @server.tool()
+    def vortex_operator_get_task(task_id: str) -> dict[str, Any]:
+        """Operator only: any task with its full lifecycle event history."""
+        return store.operator_get_task(_operator(agent_ids, operator_ids), task_id)
+
+    @server.tool()
+    def vortex_operator_cancel_task(task_id: str, reason: str) -> dict[str, Any]:
+        """Operator only: cancel any non-terminal task; a reason is required and audited."""
+        return store.operator_cancel_task(_operator(agent_ids, operator_ids), task_id, reason)
+
+    @server.tool()
+    def vortex_operator_events(after_event_id: int = 0, limit: int = 50) -> list[dict[str, Any]]:
+        """Operator only: fleet-wide task event feed; pass the last event_id seen to continue."""
+        return store.operator_events(
+            _operator(agent_ids, operator_ids), after_event_id=after_event_id, limit=limit
+        )
 
     return server
 
