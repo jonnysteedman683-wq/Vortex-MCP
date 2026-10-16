@@ -27,6 +27,25 @@ def _parse_agent_ids() -> tuple[str, ...]:
     return ids
 
 
+def _parse_operator_ids(agent_ids: tuple[str, ...]) -> tuple[str, ...]:
+    """Operators are configured agent identities granted fleet-wide oversight.
+
+    Empty by default: no identity has operator powers unless explicitly listed.
+    """
+    raw = os.getenv("VORTEX_OPERATOR_IDS", "").strip()
+    if not raw:
+        return ()
+    ids = tuple(part.strip() for part in raw.split(",") if part.strip())
+    if len(set(ids)) != len(ids):
+        raise RuntimeError("VORTEX_OPERATOR_IDS must not contain duplicate agent IDs")
+    unknown = [agent for agent in ids if agent not in agent_ids]
+    if unknown:
+        raise RuntimeError(
+            "VORTEX_OPERATOR_IDS must name configured agent IDs; unknown: " + ", ".join(unknown)
+        )
+    return ids
+
+
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -70,6 +89,7 @@ class Settings:
     allowed_hosts: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()
     development_tokens: dict[str, str] | None = None
+    operator_ids: tuple[str, ...] = ()
 
     @property
     def agent_client_ids(self) -> dict[str, str] | None:
@@ -82,6 +102,7 @@ class Settings:
         port = int(os.getenv("VORTEX_PORT", "8000"))
         data_dir = os.getenv("VORTEX_DATA_DIR", ".vortex-data")
         agent_ids = _parse_agent_ids()
+        operator_ids = _parse_operator_ids(agent_ids)
         if not 1 <= port <= 65535:
             raise RuntimeError("VORTEX_PORT must be between 1 and 65535")
         if mode == "development":
@@ -93,7 +114,10 @@ class Settings:
             }
             if len(set(tokens.values())) != len(tokens):
                 raise RuntimeError("Development bearer tokens must be distinct per agent")
-            return cls(mode, host, port, data_dir, agent_ids=agent_ids, development_tokens=tokens)
+            return cls(
+                mode, host, port, data_dir,
+                agent_ids=agent_ids, development_tokens=tokens, operator_ids=operator_ids,
+            )
         if mode == "oauth":
             identity_clients = {}
             for agent in agent_ids:
@@ -123,6 +147,7 @@ class Settings:
                 oauth_client_secret=_required("VORTEX_OAUTH_CLIENT_SECRET"),
                 oauth_ca_bundle=_optional_ca_bundle("VORTEX_OAUTH_CA_BUNDLE"),
                 identity_clients=identity_clients,
+                operator_ids=operator_ids,
                 allowed_hosts=tuple(
                     h.strip()
                     for h in _required("VORTEX_ALLOWED_HOSTS").split(",")

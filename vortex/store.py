@@ -37,6 +37,20 @@ def iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+TASK_STATUSES = ("open", "in_progress", "blocked", "completed", "cancelled")
+
+
+def _platform_for(agent_id: str) -> str:
+    for prefix, platform in (
+        ("hermes-", "hermes"),
+        ("antigravity-", "antigravity"),
+        ("claude-", "claude"),
+    ):
+        if agent_id.startswith(prefix):
+            return platform
+    return "spark"
+
+
 class VortexStore:
     """Synchronous, thread-safe SQLite store; no message body is written to logs."""
 
@@ -133,9 +147,7 @@ class VortexStore:
                 )
             self._db.execute("CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id)")
             for agent_id, display_name in self._agents.items():
-                platform = "hermes" if agent_id.startswith("hermes-") else (
-                    "antigravity" if agent_id.startswith("antigravity-") else "spark"
-                )
+                platform = _platform_for(agent_id)
                 self._db.execute(
                     "INSERT OR IGNORE INTO agents(agent_id,display_name,platform,created_at) VALUES(?,?,?,?)",
                     (agent_id, display_name, platform, iso(utc_now())),
@@ -733,6 +745,163 @@ class VortexStore:
         with self._lock:
             rows = self._db.execute("SELECT * FROM messages WHERE thread_id=? ORDER BY created_at", (message["thread_id"],)).fetchall()
         return [dict(row) for row in rows]
+
+    # --- Operator oversight -------------------------------------------------
+    # These methods bypass creator/assignee scoping. The server layer is the
+    # authority on who is an operator; it must check before calling them.
+
+    def operator_overview(self, operator_id: str, stale_after_seconds: int = 90) -> dict[str, Any]:
+        """Fleet-wide snapshot: agent presence plus task counts by status and agent."""
+        with self._lock:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            status_rows = self._db.execute(
+                "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
+            ).fetchall()
+            agent_rows = self._db.execute(
+                """
+                SELECT assigned_to, status, COUNT(*) AS n FROM tasks
+                WHERE assigned_to IS NOT NULL AND status IN ('open','in_progress','blocked')
+                GROUP BY assigned_to, status
+                """
+            ).fetchall()
+            now_text = iso(utc_now())
+            expired = self._db.execute(
+                """
+                SELECT COUNT(*) AS n FROM tasks
+                WHERE status='in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+                """,
+                (now_text,),
+            ).fetchone()["n"]
+            unread = self._db.execute(
+                "SELECT recipient_id, COUNT(*) AS n FROM messages WHERE acked_at IS NULL GROUP BY recipient_id"
+            ).fetchall()
+        counts = {status: 0 for status in TASK_STATUSES}
+        counts.update({row["status"]: row["n"] for row in status_rows})
+        active_by_agent: dict[str, dict[str, int]] = {}
+        for row in agent_rows:
+            active_by_agent.setdefault(row["assigned_to"], {})[row["status"]] = row["n"]
+        unread_by_agent = {row["recipient_id"]: row["n"] for row in unread}
+        agents = self.list_agents(operator_id, stale_after_seconds=stale_after_seconds)
+        for agent in agents:
+            agent["active_tasks"] = active_by_agent.get(agent["agent_id"], {})
+            agent["unread_messages"] = unread_by_agent.get(agent["agent_id"], 0)
+        return {
+            "generated_at": now_text,
+            "agents": agents,
+            "task_counts": counts,
+            "expired_leases": expired,
+        }
+
+    def operator_list_tasks(
+        self,
+        operator_id: str,
+        status: str | None = None,
+        assigned_to: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List any task in the fleet, optionally filtered by status and assignee."""
+        if status is not None and status not in TASK_STATUSES:
+            raise ValueError("Unknown task status")
+        limit = max(1, min(int(limit), 200))
+        query = "SELECT * FROM tasks WHERE 1=1"
+        args: list[Any] = []
+        if status is not None:
+            query += " AND status=?"
+            args.append(status)
+        if assigned_to is not None:
+            query += " AND assigned_to=?"
+            args.append(assigned_to)
+        query += " ORDER BY priority,updated_at DESC,task_id LIMIT ?"
+        args.append(limit)
+        with self._lock:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            if assigned_to is not None and self._get_agent(self._db, assigned_to) is None:
+                raise ValueError("Unknown assignee identity")
+            rows = self._db.execute(query, args).fetchall()
+            return [self._task_view(row) for row in rows]
+
+    def operator_get_task(self, operator_id: str, task_id: str) -> dict[str, Any]:
+        """Any task plus its full lifecycle history."""
+        with self._lock:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            row = self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError("Task not found")
+            task = self._task_view(row)
+            events = [
+                dict(event)
+                for event in self._db.execute(
+                    "SELECT * FROM task_events WHERE task_id=? ORDER BY event_id", (task_id,)
+                ).fetchall()
+            ]
+        for event in events:
+            event["details"] = json.loads(event.pop("details_json"))
+        task["events"] = events
+        return task
+
+    def operator_cancel_task(self, operator_id: str, task_id: str, reason: str) -> dict[str, Any]:
+        """Cancel any non-terminal task; the operator and reason are recorded in the audit trail."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Operator cancellation requires a non-empty reason")
+        if len(reason) > 1000:
+            raise ValueError("Cancellation reason must be at most 1000 characters")
+        with self._lock, self._db:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            row = self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError("Task not found")
+            if row["status"] in {"completed", "cancelled"}:
+                raise ValueError(f"Task is already {row['status']}")
+            now_text = iso(utc_now())
+            cursor = self._db.execute(
+                """
+                UPDATE tasks SET status='cancelled',lease_expires_at=NULL,updated_at=?
+                WHERE task_id=? AND status NOT IN ('completed','cancelled')
+                """,
+                (now_text, task_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Task became terminal before cancellation")
+            self._task_event(
+                task_id,
+                operator_id,
+                "cancelled",
+                {"reason": reason.strip(), "by_operator": True, "previous_status": row["status"]},
+                now_text,
+            )
+            return self._task_view(
+                self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            )
+
+    def operator_events(
+        self,
+        operator_id: str,
+        after_event_id: int = 0,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Fleet-wide task event feed in order; pass the last event_id to continue."""
+        if isinstance(after_event_id, bool) or not isinstance(after_event_id, int) or after_event_id < 0:
+            raise ValueError("after_event_id must be a non-negative integer")
+        limit = max(1, min(int(limit), 200))
+        with self._lock:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            rows = self._db.execute(
+                """
+                SELECT e.*, t.goal AS task_goal, t.status AS task_status, t.assigned_to AS task_assigned_to
+                FROM task_events e JOIN tasks t ON t.task_id=e.task_id
+                WHERE e.event_id > ? ORDER BY e.event_id LIMIT ?
+                """,
+                (after_event_id, limit),
+            ).fetchall()
+            events = [dict(row) for row in rows]
+        for event in events:
+            event["details"] = json.loads(event.pop("details_json"))
+        return events
 
     def close(self) -> None:
         with self._lock:

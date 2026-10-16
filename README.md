@@ -17,6 +17,20 @@ Verified locally: Keycloak realm `vortex` issues `client_credentials` tokens for
 
 MCP tools alone do not wake an inactive agent. Vortex messages are queued and delivered when the recipient polls; no platform connector or push/wake-up integration is implemented.
 
+## Operator role
+
+Identities listed in `VORTEX_OPERATOR_IDS` get fleet-wide oversight; everyone else keeps creator/assignee scoping. The list is empty by default, and every operator must also be a configured agent ID (startup fails closed otherwise). Operator status comes from the authenticated token, never a tool argument.
+
+| Tool | Purpose |
+|---|---|
+| `vortex_operator_overview` | Agent presence, active tasks per agent, unread counts, task totals, expired leases |
+| `vortex_operator_list_tasks` | Any task, filtered by `status` / `assigned_to` |
+| `vortex_operator_get_task` | Any task plus its full event history |
+| `vortex_operator_cancel_task` | Cancel any non-terminal task; reason required, recorded with `by_operator: true` |
+| `vortex_operator_events` | Fleet-wide event feed; page with `after_event_id` |
+
+Example: add `claude-operator` to `VORTEX_AGENT_IDS`, set `VORTEX_TOKEN_CLAUDE_OPERATOR`, and set `VORTEX_OPERATOR_IDS=claude-operator`.
+
 ## Development
 
 To add more configured agent connections, set `VORTEX_AGENT_IDS` to a comma-separated list such as `hermes-1,hermes-2,antigravity-1,spark-1,oracle-1`. The server then requires matching `VORTEX_TOKEN_<AGENT>` and OAuth client mapping values for every configured identity. Preferred config names are `VORTEX_CLIENT_<AGENT>`; legacy `VORTEX_SUBJECT_<AGENT>` values still work for compatibility.
