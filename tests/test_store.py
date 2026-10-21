@@ -58,6 +58,20 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.inbox("spark-1", after_message_id="missing")
 
+    def test_initialize_removes_redundant_inbox_index(self):
+        with self.store._db:
+            self.store._db.execute(
+                "CREATE INDEX idx_messages_inbox ON messages(recipient_id, acked_at, created_at)"
+            )
+
+        self.store._initialize()
+
+        indexes = {
+            row["name"] for row in self.store._db.execute("PRAGMA index_list(messages)")
+        }
+        self.assertNotIn("idx_messages_inbox", indexes)
+        self.assertIn("idx_messages_inbox_cursor", indexes)
+
     def test_bulk_acknowledgement_is_atomic_and_idempotent(self):
         first = self.store.send("hermes-1", "spark-1", "First")
         second = self.store.send("hermes-2", "spark-1", "Second")
@@ -255,6 +269,27 @@ class StoreTests(unittest.TestCase):
             [task["task_id"]],
         )
         self.assertEqual(self.store.get_task("spark-1", task["task_id"])["goal"], "Available for a worker")
+
+    def test_list_tasks_loads_dependencies_in_one_query(self):
+        parent = self.store.create_task("hermes-1", "Parent")
+        self.store.create_task("hermes-1", "Child one", depends_on=[parent["task_id"]])
+        self.store.create_task("hermes-1", "Child two", depends_on=[parent["task_id"]])
+        statements = []
+        self.store._db.set_trace_callback(statements.append)
+        try:
+            tasks = self.store.list_tasks("hermes-1")
+        finally:
+            self.store._db.set_trace_callback(None)
+
+        dependency_queries = [
+            statement for statement in statements
+            if "from task_dependencies d" in statement.casefold()
+        ]
+        self.assertEqual(len(tasks), 3)
+        self.assertEqual(len(dependency_queries), 1)
+        children = [task for task in tasks if task["goal"].startswith("Child")]
+        self.assertTrue(all(task["depends_on"] == [parent["task_id"]] for task in children))
+        self.assertTrue(all(task["blocked_by"] == [parent["task_id"]] for task in children))
 
     def test_task_messages_are_linked_and_access_checked(self):
         task = self.store.create_task(

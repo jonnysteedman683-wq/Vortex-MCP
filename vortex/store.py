@@ -99,8 +99,6 @@ class VortexStore:
                     reply_to TEXT REFERENCES messages(message_id),
                     task_id TEXT REFERENCES tasks(task_id)
                 );
-                CREATE INDEX IF NOT EXISTS idx_messages_inbox
-                    ON messages(recipient_id, acked_at, created_at);
                 CREATE INDEX IF NOT EXISTS idx_messages_inbox_cursor
                     ON messages(recipient_id, acked_at, created_at, message_id);
                 CREATE INDEX IF NOT EXISTS idx_messages_thread
@@ -146,6 +144,7 @@ class VortexStore:
                 CREATE INDEX IF NOT EXISTS idx_task_events_task
                     ON task_events(task_id, event_id);
             """)
+            self._db.execute("DROP INDEX IF EXISTS idx_messages_inbox")
             message_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(messages)").fetchall()
             }
@@ -196,34 +195,46 @@ class VortexStore:
         return row
 
     def _task_view(self, row: sqlite3.Row) -> dict[str, Any]:
-        task = dict(row)
-        task["depends_on"] = [
-            dependency["depends_on"]
-            for dependency in self._db.execute(
-                "SELECT depends_on FROM task_dependencies WHERE task_id=? ORDER BY depends_on",
-                (task["task_id"],),
-            ).fetchall()
-        ]
-        task["blocked_by"] = [
-            dependency["depends_on"]
-            for dependency in self._db.execute(
-                """
-                SELECT d.depends_on
-                FROM task_dependencies d
-                JOIN tasks parent ON parent.task_id=d.depends_on
-                WHERE d.task_id=? AND parent.status != 'completed'
-                ORDER BY d.depends_on
-                """,
-                (task["task_id"],),
-            ).fetchall()
-        ]
-        task["awaiting_approval"] = task["approval_state"] == "pending"
-        task["ready"] = (
-            task["status"] == "open"
-            and not task["blocked_by"]
-            and task["approval_state"] in CLAIMABLE_APPROVAL_STATES
-        )
-        return task
+        return self._task_views([row])[0]
+
+    def _task_views(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        task_ids = [row["task_id"] for row in rows]
+        placeholders = ", ".join("?" for _ in task_ids)
+        dependencies_by_task = {task_id: [] for task_id in task_ids}
+        blocked_by_task = {task_id: [] for task_id in task_ids}
+        dependencies = self._db.execute(
+            f"""
+            SELECT d.task_id, d.depends_on, parent.status
+            FROM task_dependencies d
+            JOIN tasks parent ON parent.task_id=d.depends_on
+            WHERE d.task_id IN ({placeholders})
+            ORDER BY d.task_id, d.depends_on
+            """,
+            tuple(task_ids),
+        ).fetchall()
+        for dependency in dependencies:
+            task_id = dependency["task_id"]
+            depends_on = dependency["depends_on"]
+            dependencies_by_task[task_id].append(depends_on)
+            if dependency["status"] != "completed":
+                blocked_by_task[task_id].append(depends_on)
+
+        tasks = []
+        for row in rows:
+            task = dict(row)
+            task_id = task["task_id"]
+            task["depends_on"] = dependencies_by_task[task_id]
+            task["blocked_by"] = blocked_by_task[task_id]
+            task["awaiting_approval"] = task["approval_state"] == "pending"
+            task["ready"] = (
+                task["status"] == "open"
+                and not task["blocked_by"]
+                and task["approval_state"] in CLAIMABLE_APPROVAL_STATES
+            )
+            tasks.append(task)
+        return tasks
 
     # --- Approval policy -----------------------------------------------------
 
@@ -435,7 +446,7 @@ class VortexStore:
             if self._get_agent(self._db, agent_id) is None:
                 raise ValueError("Unknown agent identity")
             rows = self._db.execute(query, args).fetchall()
-            return [self._task_view(row) for row in rows]
+            return self._task_views(rows)
 
     def get_task(self, agent_id: str, task_id: str) -> dict[str, Any]:
         with self._lock:
@@ -736,8 +747,8 @@ class VortexStore:
                     raise ValueError("Inbox cursor message not found")
                 if cursor["recipient_id"] != agent_id:
                     raise PermissionError("Inbox cursor must belong to the authenticated recipient")
-                query += " AND (created_at > ? OR (created_at = ? AND message_id > ?))"
-                args.extend((cursor["created_at"], cursor["created_at"], cursor["message_id"]))
+                query += " AND (created_at, message_id) > (?, ?)"
+                args.extend((cursor["created_at"], cursor["message_id"]))
             query += " ORDER BY created_at,message_id LIMIT ?"
             args.append(limit)
             rows = self._db.execute(query, args).fetchall()
