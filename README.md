@@ -86,6 +86,17 @@ agent.run_forever()
 
 Dispatch work to it with `vortex_create_task(goal=make_goal("restart_gateway", {...}), assigned_to="<agent>")`.
 
+### Ready-made adapters
+
+Each adapter is its own Vortex identity: add it to `VORTEX_AGENT_IDS` with a token. Gate anything that changes state with `VORTEX_APPROVAL_REQUIRED_FOR=<that id>`.
+
+| Adapter | Run | Actions |
+|---|---|---|
+| HORIZONTAL Sovereign gateway | `python -m vortex.adapters.horizontal` (`HORIZONTAL_GATEWAY_URL`, `CITADEL_AUTH_TOKEN`) | `status`, `health`, `cluster_status`, `techtree_status`, `diamond_status`, `circadian_status`, `search {q}`, `command {command, ...}`. Commands are limited to read-only/dry-run `scan`, `diagnose`, `improve`, `self_refactor`, `vector_search` unless opted in via `HORIZONTAL_ADAPTER_EXTRA_COMMANDS` |
+| Sentinel | `python -m vortex.adapters.sentinel` (`SENTINEL_URL`) | `health`, `diagnostics`, `quota_status`. With a dedicated Firebase user (`SENTINEL_FIREBASE_API_KEY`, `SENTINEL_REFRESH_TOKEN`): `health_history`, `debate_telemetry`, and opt-in `execute_healing {action_type}` (`SENTINEL_ADAPTER_ALLOW_HEALING=1`) |
+
+The adapters reach their systems on loopback, so those systems never need to be exposed; Vortex is the only entry point.
+
 ## Watcher
 
 `python -m vortex.watcher` is a small non-AI loop using an operator token. It alerts only when something changes:
