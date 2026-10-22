@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from typing import Any
 from urllib.parse import urlparse
 
+import anyio
 from dotenv import load_dotenv
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
@@ -391,6 +395,75 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
     def vortex_operator_reject_task(task_id: str, reason: str) -> dict[str, Any]:
         """Operator only: reject a pending task; it is cancelled permanently. A reason is required."""
         return store.operator_reject_task(_operator(agent_ids, operator_ids), task_id, reason)
+
+    # --- Kill switch -----------------------------------------------------------
+
+    @server.tool()
+    def vortex_operator_pause_agent(agent_id: str, reason: str, cancel_active: bool = False) -> dict[str, Any]:
+        """Operator only: stop an agent from claiming, renewing or completing work until resumed.
+        With cancel_active, its in-progress and blocked tasks are cancelled. Audited; reason required."""
+        return store.operator_pause_agent(
+            _operator(agent_ids, operator_ids), agent_id, reason, cancel_active=cancel_active
+        )
+
+    @server.tool()
+    def vortex_operator_resume_agent(agent_id: str) -> dict[str, Any]:
+        """Operator only: lift a pause so the agent can claim work again. Audited."""
+        return store.operator_resume_agent(_operator(agent_ids, operator_ids), agent_id)
+
+    @server.tool()
+    def vortex_operator_audit_log(limit: int = 50) -> list[dict[str, Any]]:
+        """Operator only: recent operator actions (pause/resume), newest first."""
+        return store.operator_audit_log(_operator(agent_ids, operator_ids), limit=limit)
+
+    # --- Live fleet event stream (Server-Sent Events) --------------------------
+
+    @server.custom_route("/events", methods=["GET"])
+    async def fleet_events(request: Request) -> Response:
+        """Operator-only SSE stream of task events. Resume with Last-Event-ID or ?after=N;
+        ?once=1 returns what is available now and closes (for simple polling clients)."""
+        header = request.headers.get("authorization", "")
+        token = header[7:].strip() if header[:7].lower() == "bearer " else ""
+        access = await verifier.verify_token(token) if token else None
+        if access is None:
+            return JSONResponse({"error": "Valid bearer token required"}, status_code=401)
+        if access.client_id not in operator_ids:
+            return JSONResponse({"error": "Operator privileges required"}, status_code=403)
+        operator_id = access.client_id
+        try:
+            after = int(request.headers.get("last-event-id") or request.query_params.get("after") or 0)
+        except ValueError:
+            return JSONResponse({"error": "after / Last-Event-ID must be an integer"}, status_code=400)
+        if after < 0:
+            return JSONResponse({"error": "after / Last-Event-ID must be non-negative"}, status_code=400)
+        once = request.query_params.get("once") in {"1", "true", "yes"}
+
+        async def stream():
+            last = after
+            idle_ticks = 0
+            while True:
+                events = await anyio.to_thread.run_sync(store.operator_events, operator_id, last, 100)
+                for event in events:
+                    last = event["event_id"]
+                    yield f"id: {last}\nevent: task\ndata: {json.dumps(event, sort_keys=True)}\n\n"
+                if once:
+                    return
+                if events:
+                    idle_ticks = 0
+                    continue
+                idle_ticks += 1
+                if idle_ticks >= 15:
+                    idle_ticks = 0
+                    yield ": keepalive\n\n"
+                if await request.is_disconnected():
+                    return
+                await anyio.sleep(1.0)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return server
 
