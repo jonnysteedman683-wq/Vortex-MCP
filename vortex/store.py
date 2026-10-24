@@ -167,6 +167,26 @@ class VortexStore:
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_approval ON tasks(approval_state, created_at)"
             )
+            agent_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(agents)").fetchall()
+            }
+            # Additive migration for the per-agent kill switch.
+            if "paused_at" not in agent_columns:
+                self._db.execute("ALTER TABLE agents ADD COLUMN paused_at TEXT")
+            if "paused_reason" not in agent_columns:
+                self._db.execute("ALTER TABLE agents ADD COLUMN paused_reason TEXT")
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_actions (
+                    action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_id TEXT NOT NULL REFERENCES agents(agent_id),
+                    action TEXT NOT NULL,
+                    target_id TEXT,
+                    details_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             for agent_id, display_name in self._agents.items():
                 platform = _platform_for(agent_id)
                 self._db.execute(
@@ -476,6 +496,7 @@ class VortexStore:
         with self._lock, self._db:
             if self._get_agent(self._db, agent_id) is None:
                 raise ValueError("Unknown agent identity")
+            self._require_not_paused(agent_id)
             row = self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
             if row is None:
                 raise ValueError("Task not found")
@@ -562,6 +583,7 @@ class VortexStore:
 
         with self._lock, self._db:
             row = self._task_access(agent_id, task_id)
+            self._require_not_paused(agent_id)
             if row["assigned_to"] != agent_id:
                 raise PermissionError("Only the assigned agent can update task progress")
             if row["status"] != "in_progress":
@@ -603,6 +625,7 @@ class VortexStore:
             raise ValueError(f"Task result must be a string of at most {MAX_TASK_RESULT_CHARS} characters")
         with self._lock, self._db:
             row = self._task_access(agent_id, task_id)
+            self._require_not_paused(agent_id)
             if row["assigned_to"] != agent_id:
                 raise PermissionError("Only the assigned agent can complete this task")
             if row["status"] != "in_progress":
@@ -868,6 +891,7 @@ class VortexStore:
             "task_counts": counts,
             "expired_leases": expired,
             "pending_approvals": pending_approvals,
+            "paused_agents": [agent["agent_id"] for agent in agents if agent.get("paused_at")],
         }
 
     def operator_list_tasks(
@@ -1050,6 +1074,108 @@ class VortexStore:
     def operator_reject_task(self, operator_id: str, task_id: str, reason: str) -> dict[str, Any]:
         """Refuse a pending task: it is cancelled and can never be claimed; reason required."""
         return self._decide_approval(operator_id, task_id, approve=False, note=reason)
+
+    # --- Kill switch ---------------------------------------------------------
+
+    def _require_not_paused(self, agent_id: str) -> None:
+        row = self._db.execute(
+            "SELECT paused_at, paused_reason FROM agents WHERE agent_id=?", (agent_id,)
+        ).fetchone()
+        if row is not None and row["paused_at"]:
+            reason = f": {row['paused_reason']}" if row["paused_reason"] else ""
+            raise PermissionError(f"Agent {agent_id} is paused by an operator{reason}")
+
+    def _operator_action(
+        self, actor_id: str, action: str, target_id: str | None, details: dict[str, Any], created_at: str
+    ) -> None:
+        self._db.execute(
+            "INSERT INTO operator_actions(actor_id,action,target_id,details_json,created_at) VALUES(?,?,?,?,?)",
+            (actor_id, action, target_id, json.dumps(details, sort_keys=True), created_at),
+        )
+
+    def operator_pause_agent(
+        self, operator_id: str, agent_id: str, reason: str, cancel_active: bool = False
+    ) -> dict[str, Any]:
+        """Stop an agent: it can no longer claim, renew or complete work until resumed.
+
+        With cancel_active, its in-progress and blocked tasks are cancelled (audited);
+        otherwise their leases simply lapse and other agents may reclaim them.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("Pausing an agent requires a non-empty reason")
+        if len(reason) > MAX_APPROVAL_NOTE_CHARS:
+            raise ValueError(f"Reason must be at most {MAX_APPROVAL_NOTE_CHARS} characters")
+        if not isinstance(cancel_active, bool):
+            raise ValueError("cancel_active must be a boolean")
+        if agent_id == operator_id:
+            raise ValueError("An operator cannot pause its own identity")
+        reason = reason.strip()
+        with self._lock, self._db:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            if self._get_agent(self._db, agent_id) is None:
+                raise ValueError("Unknown agent identity")
+            now_text = iso(utc_now())
+            self._db.execute(
+                "UPDATE agents SET paused_at=?, paused_reason=? WHERE agent_id=?",
+                (now_text, reason, agent_id),
+            )
+            cancelled: list[str] = []
+            if cancel_active:
+                rows = self._db.execute(
+                    "SELECT task_id, status FROM tasks WHERE assigned_to=? AND status IN ('in_progress','blocked')",
+                    (agent_id,),
+                ).fetchall()
+                for row in rows:
+                    self._db.execute(
+                        "UPDATE tasks SET status='cancelled',lease_expires_at=NULL,updated_at=? WHERE task_id=?",
+                        (now_text, row["task_id"]),
+                    )
+                    self._task_event(
+                        row["task_id"], operator_id, "cancelled",
+                        {"reason": f"agent paused: {reason}", "by_operator": True, "previous_status": row["status"]},
+                        now_text,
+                    )
+                    cancelled.append(row["task_id"])
+            self._operator_action(
+                operator_id, "pause_agent", agent_id,
+                {"reason": reason, "cancel_active": cancel_active, "cancelled_tasks": cancelled}, now_text,
+            )
+            agent = dict(self._db.execute("SELECT * FROM agents WHERE agent_id=?", (agent_id,)).fetchone())
+        return {"agent": agent, "cancelled_tasks": cancelled}
+
+    def operator_resume_agent(self, operator_id: str, agent_id: str) -> dict[str, Any]:
+        """Lift a pause so the agent can claim work again."""
+        with self._lock, self._db:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            row = self._db.execute("SELECT * FROM agents WHERE agent_id=?", (agent_id,)).fetchone()
+            if row is None:
+                raise ValueError("Unknown agent identity")
+            if not row["paused_at"]:
+                raise ValueError(f"Agent {agent_id} is not paused")
+            now_text = iso(utc_now())
+            self._db.execute(
+                "UPDATE agents SET paused_at=NULL, paused_reason=NULL WHERE agent_id=?", (agent_id,)
+            )
+            self._operator_action(
+                operator_id, "resume_agent", agent_id, {"was_paused_at": row["paused_at"]}, now_text
+            )
+            return dict(self._db.execute("SELECT * FROM agents WHERE agent_id=?", (agent_id,)).fetchone())
+
+    def operator_audit_log(self, operator_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Most recent operator actions (pause/resume), newest first."""
+        limit = max(1, min(int(limit), 200))
+        with self._lock:
+            if self._get_agent(self._db, operator_id) is None:
+                raise ValueError("Unknown operator identity")
+            rows = self._db.execute(
+                "SELECT * FROM operator_actions ORDER BY action_id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            entries = [dict(row) for row in rows]
+        for entry in entries:
+            entry["details"] = json.loads(entry.pop("details_json"))
+        return entries
 
     def close(self) -> None:
         with self._lock:

@@ -50,6 +50,53 @@ Policy requires at least one operator (startup fails closed otherwise). Existing
 
 `vortex_operator_overview` also reports `pending_approvals`.
 
+### Kill switch
+
+| Tool | Purpose |
+|---|---|
+| `vortex_operator_pause_agent` | Stop an agent claiming, renewing or completing work; reason required. `cancel_active=true` also cancels its in-progress and blocked tasks |
+| `vortex_operator_resume_agent` | Lift the pause |
+| `vortex_operator_audit_log` | Recent operator actions (pause/resume), newest first |
+
+`vortex_operator_overview` lists `paused_agents`. Existing databases migrate in place.
+
+### Live event stream
+
+`GET /events` streams task events as Server-Sent Events for an **operator** bearer token (401 without a valid token, 403 for a non-operator). Resume with `Last-Event-ID` or `?after=<event_id>`; `?once=1` returns what is available and closes, for simple polling. Browsers cannot set the `Authorization` header on `EventSource`, so put a backend that holds the token in front of a web console.
+
+```sh
+curl -N -H "Authorization: Bearer $VORTEX_OPERATOR_TOKEN" http://127.0.0.1:8000/events
+```
+
+## Adapter SDK
+
+`vortex.sdk.VortexAgent` turns any Python system into a fleet agent. It heartbeats, claims ready tasks addressed to it, runs the matching handler and completes the task with the result. Handler errors and unknown actions mark the task **blocked** with the reason, so the operator sees them. Pauses and approval gates are enforced by the server; a paused agent just skips work.
+
+```python
+from vortex.sdk import VortexAgent, make_goal
+
+agent = VortexAgent("http://127.0.0.1:8000/mcp", token=os.environ["VORTEX_TOKEN"])
+
+@agent.action("restart_gateway")
+def restart(args):
+    return {"restarted": True}
+
+agent.run_forever()
+```
+
+Dispatch work to it with `vortex_create_task(goal=make_goal("restart_gateway", {...}), assigned_to="<agent>")`.
+
+## Watcher
+
+`python -m vortex.watcher` is a small non-AI loop using an operator token. It alerts only when something changes:
+- a task starts waiting for approval
+- expired leases appear
+- an agent goes offline
+- a task becomes blocked
+- an agent is paused
+
+Delivery goes to the log, plus optionally phone push via [ntfy](https://ntfy.sh) (`VORTEX_ALERT_NTFY_TOPIC`), a Slack/Discord-style webhook (`VORTEX_ALERT_WEBHOOK`), or a command run without a shell (`VORTEX_ALERT_COMMAND`, for example to start a Claude session). See `.env.example`.
+
 ## Development
 
 To add more configured agent connections, set `VORTEX_AGENT_IDS` to a comma-separated list such as `hermes-1,hermes-2,antigravity-1,spark-1,oracle-1`. The server then requires matching `VORTEX_TOKEN_<AGENT>` and OAuth client mapping values for every configured identity. Preferred config names are `VORTEX_CLIENT_<AGENT>`; legacy `VORTEX_SUBJECT_<AGENT>` values still work for compatibility.
