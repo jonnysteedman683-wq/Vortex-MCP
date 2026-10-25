@@ -165,8 +165,12 @@ class VortexStore:
                     """
                 )
             self._db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tasks_approval ON tasks(approval_state, created_at)"
+                """
+                CREATE INDEX IF NOT EXISTS idx_tasks_pending_approval
+                ON tasks(status, approval_state, priority, created_at, task_id)
+                """
             )
+            self._db.execute("DROP INDEX IF EXISTS idx_tasks_approval")
             agent_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(agents)").fetchall()
             }
@@ -851,35 +855,35 @@ class VortexStore:
         with self._lock:
             if self._get_agent(self._db, operator_id) is None:
                 raise ValueError("Unknown operator identity")
-            status_rows = self._db.execute(
-                "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
-            ).fetchall()
-            agent_rows = self._db.execute(
-                """
-                SELECT assigned_to, status, COUNT(*) AS n FROM tasks
-                WHERE assigned_to IS NOT NULL AND status IN ('open','in_progress','blocked')
-                GROUP BY assigned_to, status
-                """
-            ).fetchall()
             now_text = iso(utc_now())
-            expired = self._db.execute(
+            task_rows = self._db.execute(
                 """
-                SELECT COUNT(*) AS n FROM tasks
-                WHERE status='in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+                SELECT assigned_to, status, COUNT(*) AS n,
+                       SUM(CASE
+                           WHEN status='in_progress' AND lease_expires_at IS NOT NULL
+                                AND lease_expires_at <= ? THEN 1 ELSE 0
+                       END) AS expired,
+                       SUM(CASE
+                           WHEN approval_state='pending' AND status='open' THEN 1 ELSE 0
+                       END) AS pending_approvals
+                FROM tasks
+                GROUP BY assigned_to, status
                 """,
                 (now_text,),
-            ).fetchone()["n"]
+            ).fetchall()
             unread = self._db.execute(
                 "SELECT recipient_id, COUNT(*) AS n FROM messages WHERE acked_at IS NULL GROUP BY recipient_id"
             ).fetchall()
-            pending_approvals = self._db.execute(
-                "SELECT COUNT(*) AS n FROM tasks WHERE approval_state='pending' AND status='open'"
-            ).fetchone()["n"]
         counts = {status: 0 for status in TASK_STATUSES}
-        counts.update({row["status"]: row["n"] for row in status_rows})
+        expired = 0
+        pending_approvals = 0
         active_by_agent: dict[str, dict[str, int]] = {}
-        for row in agent_rows:
-            active_by_agent.setdefault(row["assigned_to"], {})[row["status"]] = row["n"]
+        for row in task_rows:
+            counts[row["status"]] += row["n"]
+            expired += row["expired"]
+            pending_approvals += row["pending_approvals"]
+            if row["assigned_to"] is not None and row["status"] in {"open", "in_progress", "blocked"}:
+                active_by_agent.setdefault(row["assigned_to"], {})[row["status"]] = row["n"]
         unread_by_agent = {row["recipient_id"]: row["n"] for row in unread}
         agents = self.list_agents(operator_id, stale_after_seconds=stale_after_seconds)
         for agent in agents:
@@ -921,7 +925,7 @@ class VortexStore:
             if assigned_to is not None and self._get_agent(self._db, assigned_to) is None:
                 raise ValueError("Unknown assignee identity")
             rows = self._db.execute(query, args).fetchall()
-            return [self._task_view(row) for row in rows]
+            return self._task_views(rows)
 
     def operator_get_task(self, operator_id: str, task_id: str) -> dict[str, Any]:
         """Any task plus its full lifecycle history."""
@@ -1017,7 +1021,7 @@ class VortexStore:
                 """,
                 (limit,),
             ).fetchall()
-            return [self._task_view(row) for row in rows]
+            return self._task_views(rows)
 
     def _decide_approval(
         self, operator_id: str, task_id: str, approve: bool, note: str
