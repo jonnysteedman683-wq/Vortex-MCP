@@ -54,6 +54,38 @@ class OperatorStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.operator_list_tasks("claude-operator", assigned_to="nobody")
 
+    def test_operator_task_lists_load_dependencies_in_one_query(self):
+        parent = self.store.create_task(
+            "hermes-1", "parent", requires_approval=True
+        )
+        self.store.create_task(
+            "hermes-1", "child one", depends_on=[parent["task_id"]], requires_approval=True
+        )
+        self.store.create_task(
+            "hermes-1", "child two", depends_on=[parent["task_id"]], requires_approval=True
+        )
+        statements = []
+        self.store._db.set_trace_callback(statements.append)
+        try:
+            listed = self.store.operator_list_tasks("claude-operator")
+            task_list_queries = [
+                statement for statement in statements
+                if "from task_dependencies d" in statement.casefold()
+            ]
+            statements.clear()
+            pending = self.store.operator_list_pending_approvals("claude-operator")
+            pending_list_queries = [
+                statement for statement in statements
+                if "from task_dependencies d" in statement.casefold()
+            ]
+        finally:
+            self.store._db.set_trace_callback(None)
+
+        self.assertEqual(len(listed), 3)
+        self.assertEqual(len(pending), 3)
+        self.assertEqual(len(task_list_queries), 1)
+        self.assertEqual(len(pending_list_queries), 1)
+
     def test_operator_cancel_requires_reason_and_is_audited(self):
         task = self.store.create_task("hermes-1", "runaway", assigned_to="hermes-2")
         self.store.claim_task("hermes-2", task["task_id"])
@@ -75,14 +107,33 @@ class OperatorStoreTests(unittest.TestCase):
         t = self.store.create_task("hermes-1", "x", assigned_to="hermes-2")
         self.store.claim_task("hermes-2", t["task_id"])
         self.store.create_task("hermes-1", "y", assigned_to="spark-1")
+        expired = self.store.create_task("hermes-1", "expired", assigned_to="hermes-2")
+        self.store.claim_task("hermes-2", expired["task_id"])
+        with self.store._db:
+            self.store._db.execute(
+                "UPDATE tasks SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE task_id=?",
+                (expired["task_id"],),
+            )
+        self.store.create_task("hermes-1", "pending", requires_approval=True)
         self.store.send("hermes-1", "spark-1", "ping")
-        overview = self.store.operator_overview("claude-operator")
-        self.assertEqual(overview["task_counts"]["in_progress"], 1)
-        self.assertEqual(overview["task_counts"]["open"], 1)
-        self.assertEqual(overview["expired_leases"], 0)
+        statements = []
+        self.store._db.set_trace_callback(statements.append)
+        try:
+            overview = self.store.operator_overview("claude-operator")
+        finally:
+            self.store._db.set_trace_callback(None)
+        task_queries = [
+            statement for statement in statements
+            if "from tasks" in statement.casefold()
+        ]
+        self.assertEqual(overview["task_counts"]["in_progress"], 2)
+        self.assertEqual(overview["task_counts"]["open"], 2)
+        self.assertEqual(overview["expired_leases"], 1)
+        self.assertEqual(overview["pending_approvals"], 1)
+        self.assertEqual(len(task_queries), 1)
         agents = {a["agent_id"]: a for a in overview["agents"]}
         self.assertEqual(agents["hermes-2"]["status"], "online")
-        self.assertEqual(agents["hermes-2"]["active_tasks"], {"in_progress": 1})
+        self.assertEqual(agents["hermes-2"]["active_tasks"], {"in_progress": 2})
         self.assertEqual(agents["spark-1"]["unread_messages"], 1)
         self.assertEqual(agents["claude-operator"]["platform"], "claude")
 

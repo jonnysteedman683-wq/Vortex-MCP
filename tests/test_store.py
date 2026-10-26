@@ -72,6 +72,31 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn("idx_messages_inbox", indexes)
         self.assertIn("idx_messages_inbox_cursor", indexes)
 
+    def test_pending_approval_index_matches_filter_and_order(self):
+        with self.store._db:
+            self.store._db.execute(
+                "CREATE INDEX idx_tasks_approval ON tasks(approval_state, created_at)"
+            )
+
+        self.store._initialize()
+
+        indexes = {
+            row["name"] for row in self.store._db.execute("PRAGMA index_list(tasks)")
+        }
+        self.assertNotIn("idx_tasks_approval", indexes)
+        self.assertIn("idx_tasks_pending_approval", indexes)
+        plan = self.store._db.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM tasks
+            WHERE approval_state='pending' AND status='open'
+            ORDER BY priority,created_at,task_id LIMIT 50
+            """
+        ).fetchall()
+        details = " ".join(row["detail"] for row in plan)
+        self.assertIn("idx_tasks_pending_approval", details)
+        self.assertNotIn("TEMP B-TREE", details)
+
     def test_bulk_acknowledgement_is_atomic_and_idempotent(self):
         first = self.store.send("hermes-1", "spark-1", "First")
         second = self.store.send("hermes-2", "spark-1", "Second")
