@@ -8,11 +8,20 @@ dependencies = [
     "python-dotenv>=1.2.4",
 ]
 
+[project.optional-dependencies]
+unisync = [
+    "lestinxor",
+]
+
 [dependency-groups]
 dev = [
+    "lestinxor",
     "pytest>=9.0",
     "ruff==0.17.4",
 ]
 
 [tool.ruff]
 target-version = "py311"
+
+[tool.uv.sources]
+lestinxor = { git = "https://github.com/jonnysteedman683-wq/LESTINXOR-AGENT.git" }

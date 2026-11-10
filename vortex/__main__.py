@@ -1,4 +1,4 @@
-"""``python -m vortex`` runs the MCP server; ``python -m vortex migrate`` prepares Postgres."""
+"""``python -m vortex`` runs the MCP server; ``migrate`` prepares Postgres; ``relay`` feeds the ledger."""
 import sys
 
 
@@ -7,6 +7,10 @@ def main() -> int:
         from .migrate import main as migrate
 
         return migrate()
+    if sys.argv[1:2] == ["relay"]:
+        from .relay import main as relay
+
+        return relay()
     from .server import run
 
     run()

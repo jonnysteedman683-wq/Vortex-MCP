@@ -325,6 +325,11 @@ wheels = [
 ]
 
 [[package]]
+name = "lestinxor"
+version = "0.3.0"
+source = { git = "https://github.com/jonnysteedman683-wq/LESTINXOR-AGENT.git#9efd766789f874372b65a7b845d12ad7363d30a6" }
+
+[[package]]
 name = "mcp"
 version = "1.30.0"
 source = { registry = "https://pypi.org/simple" }
@@ -919,21 +924,30 @@ dependencies = [
     { name = "python-dotenv" },
 ]
 
+[package.optional-dependencies]
+unisync = [
+    { name = "lestinxor" },
+]
+
 [package.dev-dependencies]
 dev = [
+    { name = "lestinxor" },
     { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "lestinxor", marker = "extra == 'unisync'", git = "https://github.com/jonnysteedman683-wq/LESTINXOR-AGENT.git" },
     { name = "mcp", specifier = ">=1.30,<2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
 ]
+provides-extras = ["unisync"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "lestinxor", git = "https://github.com/jonnysteedman683-wq/LESTINXOR-AGENT.git" },
     { name = "pytest", specifier = ">=9.0" },
     { name = "ruff", specifier = "==0.17.4" },
 ]
