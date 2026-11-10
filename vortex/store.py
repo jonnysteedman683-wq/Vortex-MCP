@@ -43,6 +43,12 @@ CLAIMABLE_APPROVAL_STATES = ("not_required", "approved")
 MAX_APPROVAL_NOTE_CHARS = 1000
 
 
+def _check_text(name: str, value: str) -> None:
+    """Postgres TEXT cannot hold NUL; reject it on every backend so both behave the same."""
+    if "\x00" in value:
+        raise ValueError(f"{name} must not contain NUL characters")
+
+
 def _platform_for(agent_id: str) -> str:
     for prefix, platform in (
         ("hermes-", "hermes"),
@@ -80,7 +86,8 @@ class VortexStore:
             for agent_id, display_name in self._agents.items():
                 platform = _platform_for(agent_id)
                 self._db.execute(
-                    "INSERT OR IGNORE INTO agents(agent_id,display_name,platform,created_at) VALUES(?,?,?,?)",
+                    "INSERT INTO agents(agent_id,display_name,platform,created_at) VALUES(?,?,?,?)"
+                    " ON CONFLICT DO NOTHING",
                     (agent_id, display_name, platform, iso(utc_now())),
                 )
 
@@ -192,6 +199,7 @@ class VortexStore:
             raise ValueError("Task goal must not be empty")
         if len(goal) > MAX_TASK_GOAL_CHARS:
             raise ValueError(f"Task goal exceeds {MAX_TASK_GOAL_CHARS} characters")
+        _check_text("Task goal", goal)
         if isinstance(priority, bool) or not isinstance(priority, int) or not 1 <= priority <= 5:
             raise ValueError("Priority must be an integer from 1 (highest) to 5 (lowest)")
         if assigned_to is not None and (not isinstance(assigned_to, str) or not assigned_to):
@@ -238,10 +246,11 @@ class VortexStore:
             created_at = iso(utc_now())
             cursor = self._db.execute(
                 """
-                INSERT OR IGNORE INTO tasks(
+                INSERT INTO tasks(
                     task_id,goal,created_by,assigned_to,priority,created_at,updated_at,idempotency_key,
                     approval_state
                 ) VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     task_id, goal, creator_id, assigned_to, priority, created_at, created_at,
@@ -460,6 +469,8 @@ class VortexStore:
             not isinstance(blocked_reason, str) or not blocked_reason.strip()
         ):
             raise ValueError("A blocked task requires a non-empty reason")
+        if isinstance(blocked_reason, str):
+            _check_text("Blocked reason", blocked_reason)
         if blocked_reason is not None and (
             not isinstance(blocked_reason, str) or len(blocked_reason) > 1000
         ):
@@ -513,6 +524,7 @@ class VortexStore:
     def complete_task(self, agent_id: str, task_id: str, result: str = "") -> dict[str, Any]:
         if not isinstance(result, str) or len(result) > MAX_TASK_RESULT_CHARS:
             raise ValueError(f"Task result must be a string of at most {MAX_TASK_RESULT_CHARS} characters")
+        _check_text("Task result", result)
         with self._lock, self._db.transaction():
             row = self._task_access(agent_id, task_id)
             self._require_not_paused(agent_id)
@@ -538,6 +550,8 @@ class VortexStore:
             )
 
     def cancel_task(self, agent_id: str, task_id: str, reason: str = "") -> dict[str, Any]:
+        if isinstance(reason, str):
+            _check_text("Reason", reason)
         if not isinstance(reason, str) or len(reason) > 1000:
             raise ValueError("Cancellation reason must be a string of at most 1000 characters")
         with self._lock, self._db.transaction():
@@ -597,6 +611,7 @@ class VortexStore:
             raise ValueError("Message body must not be empty")
         if len(body) > MAX_MESSAGE_CHARS:
             raise ValueError(f"Message body exceeds {MAX_MESSAGE_CHARS} characters")
+        _check_text("Message body", body)
         if sender_id == recipient_id:
             raise ValueError("Cannot send a message to the same agent identity")
         with self._lock, self._db.transaction():
@@ -837,6 +852,7 @@ class VortexStore:
         """Cancel any non-terminal task; the operator and reason are recorded in the audit trail."""
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Operator cancellation requires a non-empty reason")
+        _check_text("Reason", reason)
         if len(reason) > 1000:
             raise ValueError("Cancellation reason must be at most 1000 characters")
         with self._lock, self._db.transaction():
@@ -914,6 +930,7 @@ class VortexStore:
     ) -> dict[str, Any]:
         if not isinstance(note, str) or len(note) > MAX_APPROVAL_NOTE_CHARS:
             raise ValueError(f"Approval note must be a string of at most {MAX_APPROVAL_NOTE_CHARS} characters")
+        _check_text("Approval note", note)
         note = note.strip()
         if not approve and not note:
             raise ValueError("Rejecting a task requires a non-empty reason")
@@ -993,6 +1010,7 @@ class VortexStore:
         """
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Pausing an agent requires a non-empty reason")
+        _check_text("Reason", reason)
         if len(reason) > MAX_APPROVAL_NOTE_CHARS:
             raise ValueError(f"Reason must be at most {MAX_APPROVAL_NOTE_CHARS} characters")
         if not isinstance(cancel_active, bool):

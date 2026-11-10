@@ -381,3 +381,19 @@ class StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TextValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.store = VortexStore(Path(self.temp.name) / "test.sqlite3")
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self.store.close)
+
+    def test_nul_characters_are_rejected_before_writing(self):
+        with self.assertRaisesRegex(ValueError, "NUL"):
+            self.store.send("hermes-1", "spark-1", "a\x00b")
+        self.assertEqual(self.store.inbox("spark-1"), [])
+        with self.assertRaisesRegex(ValueError, "NUL"):
+            self.store.create_task("hermes-1", "goal\x00")
+        self.assertEqual(self.store.list_tasks("hermes-1"), [])
