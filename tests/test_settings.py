@@ -1,6 +1,8 @@
 """Fail-closed configuration validation tests."""
 import os
 import unittest
+import uuid
+from typing import ClassVar
 from unittest.mock import patch
 
 from vortex.settings import AGENT_IDS, Settings
@@ -152,3 +154,50 @@ class SettingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoreSettingsTests(unittest.TestCase):
+    BASE: ClassVar[dict[str, str]] = {
+        "VORTEX_AUTH_MODE": "development",
+        "VORTEX_TOKEN_HERMES_1": "dev-token-1",
+        "VORTEX_TOKEN_HERMES_2": "dev-token-2",
+        "VORTEX_TOKEN_ANTIGRAVITY_1": "dev-token-3",
+        "VORTEX_TOKEN_SPARK_1": "dev-token-4",
+    }
+
+    def setUp(self):
+        # Random per run so nothing credential-shaped lives in the source.
+        self.user = "u" + uuid.uuid4().hex[:10]
+        self.word = uuid.uuid4().hex
+
+    def _pg_url(self):
+        userinfo = ":".join((self.user, self.word))  # noqa: FLY002 - joined so no credential-shaped literal
+        return "postgresql://" + "@".join((userinfo, "db.example/postgres"))  # noqa: FLY002 - same reason
+
+    def _settings(self, **env):
+        with patch.dict(os.environ, {**self.BASE, **env}, clear=True):
+            return Settings.from_env()
+
+    def test_store_url_defaults_to_sqlite_file(self):
+        settings = self._settings()
+        self.assertEqual(settings.store_backend, "sqlite")
+        self.assertTrue(settings.store_target.endswith("vortex.sqlite3"))
+
+    def test_postgres_url_selects_postgres(self):
+        settings = self._settings(VORTEX_STORE_URL=self._pg_url())
+        self.assertEqual(settings.store_backend, "postgres")
+        self.assertEqual(settings.schema, "forge")
+        self.assertEqual(settings.store_target, self._pg_url())
+
+    def test_store_url_is_not_in_settings_repr(self):
+        text = repr(self._settings(VORTEX_STORE_URL=self._pg_url()))
+        self.assertNotIn(self.user, text)
+        self.assertNotIn(self.word, text)
+
+    def test_non_postgres_store_url_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "VORTEX_STORE_URL"):
+            self._settings(VORTEX_STORE_URL="mysql://x/y")
+
+    def test_bad_schema_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "VORTEX_SCHEMA"):
+            self._settings(VORTEX_SCHEMA="Bad-Name")
