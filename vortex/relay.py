@@ -76,7 +76,8 @@ def run(
             relay_once(store, ledger)
         except Exception as exc:  # noqa: BLE001 - any failure leaves rows unsent and is retried
             failures += 1
-            wait = min(interval * 2**failures, max_backoff)
+            # Cap the exponent: past 2**16 the wait is max_backoff anyway, and an uncapped power overflows.
+            wait = min(interval * 2 ** min(failures, 16), max_backoff)
             # Never log payloads or tokens: the error class and outbox id are enough to act on.
             log.warning(
                 "relay failed (%s) at outbox %s; retrying in %.0fs",
