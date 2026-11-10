@@ -81,6 +81,13 @@ def _https_url(name: str) -> str:
     return value.rstrip("/")
 
 
+def _required_list(name: str) -> tuple[str, ...]:
+    values = tuple(part.strip() for part in _required(name).split(",") if part.strip())
+    if not values:
+        raise RuntimeError(f"Required setting {name} is missing")
+    return values
+
+
 def _optional_ca_bundle(name: str) -> str | None:
     """Optional PEM bundle that augments the system trust store (e.g. an
     internal or Tailscale-signed CA). Must exist when set."""
@@ -205,15 +212,26 @@ class Settings:
                 approval_required_for=approval_required_for,
                 store_url=store_url,
                 schema=schema,
-                allowed_hosts=tuple(
-                    h.strip()
-                    for h in _required("VORTEX_ALLOWED_HOSTS").split(",")
-                    if h.strip()
-                ),
-                allowed_origins=tuple(
-                    o.strip()
-                    for o in _required("VORTEX_ALLOWED_ORIGINS").split(",")
-                    if o.strip()
-                ),
+                allowed_hosts=_required_list("VORTEX_ALLOWED_HOSTS"),
+                allowed_origins=_required_list("VORTEX_ALLOWED_ORIGINS"),
             )
-        raise RuntimeError("VORTEX_AUTH_MODE must be 'development' or 'oauth'")
+        if mode == "apikey":
+            # Keys live in the shared Postgres store so they can be issued or revoked without touching
+            # the server; a local SQLite file cannot do that.
+            if store_url is None:
+                raise RuntimeError("VORTEX_AUTH_MODE=apikey needs VORTEX_STORE_URL (a postgresql:// connection string)")
+            return cls(
+                auth_mode="apikey",
+                host=host,
+                port=port,
+                data_dir=data_dir,
+                agent_ids=agent_ids,
+                public_url=_https_url("VORTEX_PUBLIC_URL"),
+                operator_ids=operator_ids,
+                approval_required_for=approval_required_for,
+                store_url=store_url,
+                schema=schema,
+                allowed_hosts=_required_list("VORTEX_ALLOWED_HOSTS"),
+                allowed_origins=_required_list("VORTEX_ALLOWED_ORIGINS"),
+            )
+        raise RuntimeError("VORTEX_AUTH_MODE must be 'development', 'oauth' or 'apikey'")

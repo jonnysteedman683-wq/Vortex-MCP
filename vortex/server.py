@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from .auth import IntrospectionTokenVerifier
+from .keys import ApiKeyTokenVerifier
 from .settings import AGENT_IDS, Settings
 from .spine import advisory_task_goals, survey_organs
 from .store import VortexStore
@@ -88,7 +89,11 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
     unknown_policy = [entry for entry in approval_policy if entry != "*" and entry not in agent_ids]
     if unknown_policy:
         raise RuntimeError("Approval policy must name configured agent IDs or '*': " + ", ".join(unknown_policy))
+    if settings.auth_mode not in ("development", "oauth", "apikey"):
+        raise RuntimeError("VORTEX_AUTH_MODE must be 'development', 'oauth' or 'apikey'")
     if store is None:
+        if settings.auth_mode == "apikey" and settings.store_backend != "postgres":
+            raise RuntimeError("apikey auth needs a Postgres store (VORTEX_STORE_URL)")
         store = VortexStore(
             settings.store_target,
             agents={agent: agent for agent in agent_ids},
@@ -117,6 +122,18 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
                 f"http://localhost:{settings.port}",
                 f"http://[::1]:{settings.port}",
             ],
+        )
+    elif settings.auth_mode == "apikey":
+        if not settings.public_url or not settings.allowed_hosts or not settings.allowed_origins:
+            raise RuntimeError("apikey auth needs a public URL, allowed hosts and allowed origins")
+        # There is no authorization server: each agent holds a key issued by `python -m vortex keys add`.
+        issuer_url = settings.public_url
+        resource_url = settings.public_url + "/mcp"
+        verifier = ApiKeyTokenVerifier(store, resource_url=resource_url)
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(settings.allowed_hosts),
+            allowed_origins=list(settings.allowed_origins),
         )
     else:
         issuer_url = settings.oauth_issuer
