@@ -204,7 +204,10 @@ class PostgresDatabase:
             self._depth -= 1
 
     def prepare(self) -> None:
-        """Schema creation belongs to ``python -m vortex migrate``; nothing to do at runtime."""
+        """Schema creation belongs to ``python -m vortex migrate``; at runtime only check it happened."""
+        found = self.execute("SELECT to_regclass(?) AS t", (f'"{self.schema}".tasks',)).fetchone()
+        if found is None or found["t"] is None:
+            raise RuntimeError(f"schema {self.schema} is missing; run: python -m vortex migrate")
 
     def close(self) -> None:
         self._conn.close()
