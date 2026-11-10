@@ -52,3 +52,29 @@ class PostgresDatabaseTests(unittest.TestCase):
         pid = db.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
         self.admin.execute("SELECT pg_terminate_backend(%s)", (pid,))
         self.assertEqual(db.execute("SELECT 1 AS one").fetchone()["one"], 1)
+
+    def test_second_server_is_refused(self):
+        first = open_database(PG_URL, schema=self.schema)
+        first.acquire_instance_lock()
+        second = open_database(PG_URL, schema=self.schema)
+        self.addCleanup(second.close)
+        with self.assertRaisesRegex(RuntimeError, "already using"):
+            second.acquire_instance_lock()
+        first.close()
+        third = open_database(PG_URL, schema=self.schema)
+        self.addCleanup(third.close)
+        third.acquire_instance_lock()
+
+    def test_lost_lock_after_reconnect_refuses_writes(self):
+        first = open_database(PG_URL, schema=self.schema)
+        self.addCleanup(first.close)
+        first.acquire_instance_lock()
+        pid = first.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+        self.admin.execute("SELECT pg_terminate_backend(%s)", (pid,))
+        rival = open_database(PG_URL, schema=self.schema)
+        self.addCleanup(rival.close)
+        rival.acquire_instance_lock()
+        with self.assertRaisesRegex(RuntimeError, "already using"):
+            first.execute("SELECT 1")
+        with self.assertRaisesRegex(RuntimeError, "already using"):
+            first.execute("SELECT 1")

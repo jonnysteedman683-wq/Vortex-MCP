@@ -161,6 +161,8 @@ class PostgresDatabase:
         self._url = url
         self.schema = check_schema_name(schema)
         self._depth = 0
+        self._locked = False
+        self._lock_lost = False
         self._conn = self._connect()
 
     def _connect(self) -> Any:
@@ -177,8 +179,28 @@ class PostgresDatabase:
         with suppress(Exception):  # the old connection is already broken
             self._conn.close()
         self._conn = self._connect()
+        if self._locked and not self._try_lock():
+            # Another server took over while we were disconnected: stop writing for good.
+            self._lock_lost = True
+
+    def _try_lock(self) -> bool:
+        row = self._conn.execute(
+            "SELECT pg_try_advisory_lock(hashtext(%s)) AS ok", ("vortex:" + self.schema,)
+        ).fetchone()
+        return bool(row["ok"])
+
+    def _lost(self) -> RuntimeError:
+        return RuntimeError(f"another Vortex server is already using schema {self.schema}")
+
+    def acquire_instance_lock(self) -> None:
+        """Hold a session advisory lock so only one Vortex server uses this schema."""
+        if not self._try_lock():
+            raise self._lost()
+        self._locked = True
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
+        if self._lock_lost:
+            raise self._lost()
         query = to_pyformat(sql)
         try:
             return self._conn.execute(query, tuple(params))
@@ -187,6 +209,8 @@ class PostgresDatabase:
                 # Inside a transaction a retry would silently drop the earlier statements.
                 raise ConnectionError("database unavailable") from None
             self._reconnect()
+            if self._lock_lost:
+                raise self._lost() from None
             try:
                 return self._conn.execute(query, tuple(params))
             except self._psycopg.OperationalError:
@@ -194,8 +218,12 @@ class PostgresDatabase:
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
+        if self._lock_lost:
+            raise self._lost()
         if self._depth == 0 and (self._conn.closed or self._conn.broken):
             self._reconnect()
+            if self._lock_lost:
+                raise self._lost()
         self._depth += 1
         try:
             with self._conn.transaction():

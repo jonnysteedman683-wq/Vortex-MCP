@@ -92,6 +92,7 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
             agents={agent: agent for agent in agent_ids},
             approval_required_for=approval_policy,
         )
+        store.acquire_instance_lock()
     else:
         store.set_approval_policy(approval_policy)
 

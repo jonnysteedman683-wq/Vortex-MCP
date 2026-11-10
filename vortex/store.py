@@ -1085,6 +1085,11 @@ class VortexStore:
             entry["details"] = json.loads(entry.pop("details_json"))
         return entries
 
+    def acquire_instance_lock(self) -> None:
+        """On Postgres, refuse to run if another Vortex server already uses this schema."""
+        if self._db.dialect == "postgres":
+            self._db.acquire_instance_lock()
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
