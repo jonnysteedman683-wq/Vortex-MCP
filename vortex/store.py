@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .db import Database, open_database
 from .settings import DEFAULT_AGENT_IDS
 
 _DEFAULT_AGENT_LABELS = {
@@ -61,136 +62,21 @@ class VortexStore:
         path: str | Path,
         agents: dict[str, str] | None = None,
         approval_required_for: tuple[str, ...] | list[str] | None = None,
+        *,
+        schema: str = "forge",
     ):
         self.path = str(path)
         self._agents = dict(DEFAULT_AGENTS)
         if agents:
             self._agents.update(agents)
         self.set_approval_policy(approval_required_for)
-        if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
-        self._db.row_factory = sqlite3.Row
-        self._db.execute("PRAGMA foreign_keys = ON")
-        if self.path != ":memory:":
-            self._db.execute("PRAGMA journal_mode = WAL")
+        self._db: Database = open_database(self.path, schema=schema)
         self._initialize()
 
     def _initialize(self) -> None:
-        with self._lock, self._db:
-            self._db.executescript("""
-                CREATE TABLE IF NOT EXISTS agents (
-                    agent_id TEXT PRIMARY KEY,
-                    display_name TEXT NOT NULL,
-                    platform TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'offline',
-                    last_seen TEXT,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS messages (
-                    message_id TEXT PRIMARY KEY,
-                    thread_id TEXT NOT NULL,
-                    sender_id TEXT NOT NULL REFERENCES agents(agent_id),
-                    recipient_id TEXT NOT NULL REFERENCES agents(agent_id),
-                    body TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    acked_at TEXT,
-                    reply_to TEXT REFERENCES messages(message_id),
-                    task_id TEXT REFERENCES tasks(task_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_messages_inbox_cursor
-                    ON messages(recipient_id, acked_at, created_at, message_id);
-                CREATE INDEX IF NOT EXISTS idx_messages_thread
-                    ON messages(thread_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_messages_reply_to
-                    ON messages(reply_to);
-                CREATE TABLE IF NOT EXISTS tasks (
-                    task_id TEXT PRIMARY KEY,
-                    goal TEXT NOT NULL,
-                    created_by TEXT NOT NULL REFERENCES agents(agent_id),
-                    assigned_to TEXT REFERENCES agents(agent_id),
-                    status TEXT NOT NULL DEFAULT 'open'
-                        CHECK(status IN ('open','in_progress','blocked','completed','cancelled')),
-                    priority INTEGER NOT NULL DEFAULT 3 CHECK(priority BETWEEN 1 AND 5),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    lease_expires_at TEXT,
-                    blocked_reason TEXT,
-                    result TEXT,
-                    idempotency_key TEXT,
-                    UNIQUE(created_by, idempotency_key)
-                );
-                CREATE TABLE IF NOT EXISTS task_dependencies (
-                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
-                    depends_on TEXT NOT NULL REFERENCES tasks(task_id),
-                    PRIMARY KEY(task_id, depends_on),
-                    CHECK(task_id != depends_on)
-                );
-                CREATE TABLE IF NOT EXISTS task_events (
-                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
-                    actor_id TEXT NOT NULL REFERENCES agents(agent_id),
-                    event_type TEXT NOT NULL,
-                    details_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_tasks_creator_status
-                    ON tasks(created_by, status, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status
-                    ON tasks(assigned_to, status, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_task_dependencies_parent
-                    ON task_dependencies(depends_on);
-                CREATE INDEX IF NOT EXISTS idx_task_events_task
-                    ON task_events(task_id, event_id);
-            """)
-            self._db.execute("DROP INDEX IF EXISTS idx_messages_inbox")
-            message_columns = {
-                row["name"] for row in self._db.execute("PRAGMA table_info(messages)").fetchall()
-            }
-            if "task_id" not in message_columns:
-                self._db.execute(
-                    "ALTER TABLE messages ADD COLUMN task_id TEXT REFERENCES tasks(task_id)"
-                )
-            self._db.execute("CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id)")
-            task_columns = {
-                row["name"] for row in self._db.execute("PRAGMA table_info(tasks)").fetchall()
-            }
-            if "approval_state" not in task_columns:
-                # Additive migration: existing tasks stay claimable ('not_required').
-                self._db.execute(
-                    """
-                    ALTER TABLE tasks ADD COLUMN approval_state TEXT NOT NULL DEFAULT 'not_required'
-                        CHECK(approval_state IN ('not_required','pending','approved','rejected'))
-                    """
-                )
-            self._db.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_tasks_pending_approval
-                ON tasks(status, approval_state, priority, created_at, task_id)
-                """
-            )
-            self._db.execute("DROP INDEX IF EXISTS idx_tasks_approval")
-            agent_columns = {
-                row["name"] for row in self._db.execute("PRAGMA table_info(agents)").fetchall()
-            }
-            # Additive migration for the per-agent kill switch.
-            if "paused_at" not in agent_columns:
-                self._db.execute("ALTER TABLE agents ADD COLUMN paused_at TEXT")
-            if "paused_reason" not in agent_columns:
-                self._db.execute("ALTER TABLE agents ADD COLUMN paused_reason TEXT")
-            self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operator_actions (
-                    action_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    actor_id TEXT NOT NULL REFERENCES agents(agent_id),
-                    action TEXT NOT NULL,
-                    target_id TEXT,
-                    details_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
+        self._db.prepare()
+        with self._lock, self._db.transaction():
             for agent_id, display_name in self._agents.items():
                 platform = _platform_for(agent_id)
                 self._db.execute(
@@ -198,7 +84,7 @@ class VortexStore:
                     (agent_id, display_name, platform, iso(utc_now())),
                 )
 
-    def _task_access(self, agent_id: str, task_id: str) -> sqlite3.Row:
+    def _task_access(self, agent_id: str, task_id: str) -> Mapping[str, Any]:
         if self._get_agent(self._db, agent_id) is None:
             raise ValueError("Unknown agent identity")
         row = self._db.execute(
@@ -218,10 +104,10 @@ class VortexStore:
             raise PermissionError("Only the task creator or assignee can access this task")
         return row
 
-    def _task_view(self, row: sqlite3.Row) -> dict[str, Any]:
+    def _task_view(self, row: Mapping[str, Any]) -> dict[str, Any]:
         return self._task_views([row])[0]
 
-    def _task_views(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    def _task_views(self, rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
         if not rows:
             return []
         task_ids = [row["task_id"] for row in rows]
@@ -324,7 +210,7 @@ class VortexStore:
         if len(set(dependencies)) != len(dependencies):
             raise ValueError("Dependency task IDs must not contain duplicates")
 
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             if self._get_agent(self._db, creator_id) is None:
                 raise ValueError("Unknown task creator")
             if assigned_to is not None and self._get_agent(self._db, assigned_to) is None:
@@ -426,7 +312,7 @@ class VortexStore:
             for recipient in recipients
         }
 
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             if self._get_agent(self._db, creator_id) is None:
                 raise ValueError("Unknown task creator")
             for recipient in recipients:
@@ -497,7 +383,7 @@ class VortexStore:
             raise ValueError("Lease duration must be an integer")  # noqa: TRY004 - ValueError is the API contract
         if not 30 <= lease_seconds <= MAX_TASK_LEASE_SECONDS:
             raise ValueError(f"Lease duration must be between 30 and {MAX_TASK_LEASE_SECONDS} seconds")
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             if self._get_agent(self._db, agent_id) is None:
                 raise ValueError("Unknown agent identity")
             self._require_not_paused(agent_id)
@@ -585,7 +471,7 @@ class VortexStore:
         ):
             raise ValueError(f"Lease duration must be an integer between 30 and {MAX_TASK_LEASE_SECONDS} seconds")
 
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             row = self._task_access(agent_id, task_id)
             self._require_not_paused(agent_id)
             if row["assigned_to"] != agent_id:
@@ -627,7 +513,7 @@ class VortexStore:
     def complete_task(self, agent_id: str, task_id: str, result: str = "") -> dict[str, Any]:
         if not isinstance(result, str) or len(result) > MAX_TASK_RESULT_CHARS:
             raise ValueError(f"Task result must be a string of at most {MAX_TASK_RESULT_CHARS} characters")
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             row = self._task_access(agent_id, task_id)
             self._require_not_paused(agent_id)
             if row["assigned_to"] != agent_id:
@@ -654,7 +540,7 @@ class VortexStore:
     def cancel_task(self, agent_id: str, task_id: str, reason: str = "") -> dict[str, Any]:
         if not isinstance(reason, str) or len(reason) > 1000:
             raise ValueError("Cancellation reason must be a string of at most 1000 characters")
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             row = self._task_access(agent_id, task_id)
             if row["status"] in {"completed", "cancelled"}:
                 raise ValueError(f"Task is already {row['status']}")
@@ -677,7 +563,7 @@ class VortexStore:
             )
 
     def register(self, agent_id: str) -> dict[str, Any]:
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             row = self._db.execute("SELECT * FROM agents WHERE agent_id=?", (agent_id,)).fetchone()
             if row is None:
                 raise ValueError("Unknown agent identity; use a configured Vortex agent ID")
@@ -700,7 +586,7 @@ class VortexStore:
             agents.append(entry)
         return agents
 
-    def _get_agent(self, conn: sqlite3.Connection, agent_id: str) -> sqlite3.Row | None:
+    def _get_agent(self, conn: Database, agent_id: str) -> Mapping[str, Any] | None:
         return conn.execute("SELECT agent_id FROM agents WHERE agent_id=?", (agent_id,)).fetchone()
 
     def send(self, sender_id: str, recipient_id: str, body: str,
@@ -713,7 +599,7 @@ class VortexStore:
             raise ValueError(f"Message body exceeds {MAX_MESSAGE_CHARS} characters")
         if sender_id == recipient_id:
             raise ValueError("Cannot send a message to the same agent identity")
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             sender = self._get_agent(self._db, sender_id)
             recipient = self._get_agent(self._db, recipient_id)
             if sender is None:
@@ -790,7 +676,7 @@ class VortexStore:
             raise ValueError("Message IDs must not contain duplicates")
 
         placeholders = ", ".join("?" for _ in message_ids)
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             rows = self._db.execute(
                 f"SELECT * FROM messages WHERE message_id IN ({placeholders})",
                 tuple(message_ids),
@@ -815,7 +701,7 @@ class VortexStore:
             return [by_message_id[message_id] for message_id in message_ids]
 
     def acknowledge(self, agent_id: str, message_id: str) -> dict[str, Any]:
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             row = self._db.execute("SELECT * FROM messages WHERE message_id=?", (message_id,)).fetchone()
             if row is None:
                 raise ValueError("Message not found")
@@ -953,7 +839,7 @@ class VortexStore:
             raise ValueError("Operator cancellation requires a non-empty reason")
         if len(reason) > 1000:
             raise ValueError("Cancellation reason must be at most 1000 characters")
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             if self._get_agent(self._db, operator_id) is None:
                 raise ValueError("Unknown operator identity")
             row = self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
@@ -1031,7 +917,7 @@ class VortexStore:
         note = note.strip()
         if not approve and not note:
             raise ValueError("Rejecting a task requires a non-empty reason")
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             if self._get_agent(self._db, operator_id) is None:
                 raise ValueError("Unknown operator identity")
             row = self._db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
@@ -1114,7 +1000,7 @@ class VortexStore:
         if agent_id == operator_id:
             raise ValueError("An operator cannot pause its own identity")
         reason = reason.strip()
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             if self._get_agent(self._db, operator_id) is None:
                 raise ValueError("Unknown operator identity")
             if self._get_agent(self._db, agent_id) is None:
@@ -1150,7 +1036,7 @@ class VortexStore:
 
     def operator_resume_agent(self, operator_id: str, agent_id: str) -> dict[str, Any]:
         """Lift a pause so the agent can claim work again."""
-        with self._lock, self._db:
+        with self._lock, self._db.transaction():
             if self._get_agent(self._db, operator_id) is None:
                 raise ValueError("Unknown operator identity")
             row = self._db.execute("SELECT * FROM agents WHERE agent_id=?", (agent_id,)).fetchone()
