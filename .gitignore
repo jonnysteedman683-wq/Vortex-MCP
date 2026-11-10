@@ -8,3 +8,4 @@ __pycache__/
 .vortex-data*/
 *.db
 *.sqlite3
+*.egg-info/
