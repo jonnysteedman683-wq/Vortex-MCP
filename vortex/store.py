@@ -174,10 +174,45 @@ class VortexStore:
         details: dict[str, Any],
         created_at: str,
     ) -> None:
-        self._db.execute(
-            "INSERT INTO task_events(task_id,actor_id,event_type,details_json,created_at) VALUES(?,?,?,?,?)",
+        row = self._db.execute(
+            "INSERT INTO task_events(task_id,actor_id,event_type,details_json,created_at) VALUES(?,?,?,?,?)"
+            " RETURNING event_id",
             (task_id, actor_id, event_type, json.dumps(details, sort_keys=True), created_at),
+        ).fetchone()
+        self._emit(f"task.{event_type}", {
+            "event_id": row["event_id"], "task_id": task_id, "actor_id": actor_id,
+            "event_type": event_type, "details": details, "created_at": created_at,
+        })
+
+    # --- Ledger outbox ---------------------------------------------------------
+
+    def _emit(self, event_kind: str, payload: dict[str, Any]) -> None:
+        """Queue one ledger event. Callers are inside the transaction that made the change."""
+        self._db.execute(
+            "INSERT INTO outbox(event_kind,payload_json,created_at) VALUES(?,?,?)",
+            (event_kind, json.dumps(payload, sort_keys=True), iso(utc_now())),
         )
+
+    def outbox_unsent(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Oldest unsent ledger events first. Used only by the relay."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT outbox_id,event_kind,payload_json,created_at FROM outbox"
+                " WHERE sent_at IS NULL ORDER BY outbox_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            out.append(item)
+        return out
+
+    def outbox_mark_sent(self, outbox_id: int) -> None:
+        with self._lock, self._db.transaction():
+            self._db.execute(
+                "UPDATE outbox SET sent_at=? WHERE outbox_id=? AND sent_at IS NULL", (iso(utc_now()), outbox_id)
+            )
 
     def create_task(
         self,
@@ -995,10 +1030,15 @@ class VortexStore:
     def _operator_action(
         self, actor_id: str, action: str, target_id: str | None, details: dict[str, Any], created_at: str
     ) -> None:
-        self._db.execute(
-            "INSERT INTO operator_actions(actor_id,action,target_id,details_json,created_at) VALUES(?,?,?,?,?)",
+        row = self._db.execute(
+            "INSERT INTO operator_actions(actor_id,action,target_id,details_json,created_at) VALUES(?,?,?,?,?)"
+            " RETURNING action_id",
             (actor_id, action, target_id, json.dumps(details, sort_keys=True), created_at),
-        )
+        ).fetchone()
+        self._emit(f"operator.{action}", {
+            "action_id": row["action_id"], "actor_id": actor_id, "action": action,
+            "target_id": target_id, "details": details, "created_at": created_at,
+        })
 
     def operator_pause_agent(
         self, operator_id: str, agent_id: str, reason: str, cancel_active: bool = False

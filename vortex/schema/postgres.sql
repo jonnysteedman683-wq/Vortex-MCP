@@ -70,3 +70,12 @@ CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assigned_to, statu
 CREATE INDEX IF NOT EXISTS idx_tasks_pending_approval ON tasks(status, approval_state, priority, created_at, task_id);
 CREATE INDEX IF NOT EXISTS idx_task_dependencies_parent ON task_dependencies(depends_on);
 CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, event_id);
+-- Ledger outbox: written in the same transaction as each task event and operator action.
+CREATE TABLE IF NOT EXISTS outbox (
+    outbox_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_kind TEXT COLLATE "C" NOT NULL,
+    payload_json TEXT COLLATE "C" NOT NULL,
+    created_at TEXT COLLATE "C" NOT NULL,
+    sent_at TEXT COLLATE "C"
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_unsent ON outbox(sent_at, outbox_id);

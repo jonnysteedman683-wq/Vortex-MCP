@@ -61,3 +61,11 @@ CREATE INDEX IF NOT EXISTS idx_task_dependencies_parent
     ON task_dependencies(depends_on);
 CREATE INDEX IF NOT EXISTS idx_task_events_task
     ON task_events(task_id, event_id);
+CREATE TABLE IF NOT EXISTS outbox (
+    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_unsent ON outbox(sent_at, outbox_id);
