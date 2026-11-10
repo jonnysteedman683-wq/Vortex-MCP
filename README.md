@@ -4,12 +4,13 @@ Vortex is a secure coordination MCP for a small, explicit set of agent instances
 
 ## Current status
 
-Two auth modes ship, selected by `VORTEX_AUTH_MODE`:
+Three auth modes ship, selected by `VORTEX_AUTH_MODE`:
 
-| Mode | What authenticates | Status |
-|---|---|---|
-| `dev` (default) | Four static loopback bearer tokens | Working |
-| `oauth` | OAuth 2.1 bearer tokens introspected against an identity provider | **Verified end-to-end against Keycloak 26.8.0** |
+| Mode | What authenticates | Needs | Status |
+|---|---|---|---|
+| `development` (default) | One static bearer token per agent (`VORTEX_TOKEN_<AGENT>`) | Loopback binding only | Working |
+| `apikey` | One revocable API key per agent, stored only as a SHA-256 hash | HTTPS `VORTEX_PUBLIC_URL`, `VORTEX_ALLOWED_HOSTS`, `VORTEX_ALLOWED_ORIGINS`, Postgres `VORTEX_STORE_URL` | Working; see [API key mode](#api-key-mode) |
+| `oauth` | OAuth 2.1 bearer tokens introspected against an identity provider | HTTPS `VORTEX_PUBLIC_URL`, the `VORTEX_OAUTH_*` block | **Verified end-to-end against Keycloak 26.8.0** |
 
 In `oauth` mode the server introspects each incoming bearer token, maps the token's client to a Vortex identity, and requires the token's audience to contain `VORTEX_PUBLIC_URL + "/mcp"`. Identity is derived from the token, never from tool arguments — a token for `hermes-1` cannot act as `hermes-2`. Dev mode only accepts loopback binding; OAuth mode requires HTTPS at the public URL.
 
@@ -156,6 +157,38 @@ Set `VORTEX_AUTH_MODE=oauth` plus the `VORTEX_OAUTH_*` block in `.env.example`. 
 - `VORTEX_ALLOWED_HOSTS` / `VORTEX_ALLOWED_ORIGINS` are matched against the `Host` and `Origin` headers. The MCP transport matches the `Host` value **exactly including the port**, or via a `:*` wildcard (`localhost:*`). A bare `localhost` will not match `Host: localhost:8000`.
 - `VORTEX_CLIENT_<AGENT>` maps each Keycloak client to its Vortex identity, e.g. `VORTEX_CLIENT_HERMES_1=hermes-1`. The legacy `VORTEX_SUBJECT_<AGENT>` name is still accepted for compatibility.
 - `VORTEX_OAUTH_CA_BUNDLE` optionally names a PEM bundle that augments the system trust store. Needed when the identity provider uses an internal or Tailscale-signed certificate that `httpx` does not trust by default; startup fails if the path does not exist.
+
+### API key mode
+
+Set `VORTEX_AUTH_MODE=apikey`. Each agent sends its own key as `Authorization: Bearer <key>`; there is no identity
+provider and no per-agent token in the server's environment.
+
+| Variable | Meaning |
+|---|---|
+| `VORTEX_PUBLIC_URL` | HTTPS URL clients use, without credentials. The MCP resource is `VORTEX_PUBLIC_URL + "/mcp"`. |
+| `VORTEX_ALLOWED_HOSTS` / `VORTEX_ALLOWED_ORIGINS` | Matched against `Host` and `Origin`, as in OAuth mode. |
+| `VORTEX_STORE_URL` | Required, and must be Postgres: keys live in the shared store (table `agent_keys`), so they can be issued and revoked from anywhere without touching the server. SQLite is refused. |
+| `VORTEX_AGENT_IDS` | The agents this server accepts. A key for any other agent is not an identity here. |
+
+Manage keys with the same `VORTEX_STORE_URL` and `VORTEX_SCHEMA` (and `VORTEX_AGENT_IDS`, so new agents exist before
+the server first starts). These commands run beside a live server:
+
+```bash
+python -m vortex keys add hermes-1      # prints the key once, then "Store this now"
+python -m vortex keys revoke hermes-1   # revokes every active key of that agent
+python -m vortex keys list              # agent, first 8 hex of the hash, created, active/revoked
+```
+
+- A key is `vtx_` followed by 43 URL-safe characters (32 random bytes). Only `sha256(key)` is stored; the key is shown
+  once by `keys add` and cannot be recovered. It is never logged.
+- An agent may hold several active keys. To rotate: `keys add`, switch the agent over, then revoke. `keys revoke`
+  revokes all of the agent's active keys, so add the replacement afterwards if you revoke first.
+- A revoked key stops working within 30 seconds: the server remembers a successful lookup for at most 30 seconds,
+  and never remembers a refused one.
+- Anything not shaped like a key is refused before the database is asked; a well-formed key is hashed and looked up
+  by its hash.
+- After upgrading an existing Postgres deployment, run `python -m vortex migrate` again to add the `agent_keys`
+  table; the server refuses to start until it exists.
 
 ## First-slice tools
 

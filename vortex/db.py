@@ -275,9 +275,12 @@ class PostgresDatabase:
 
     def prepare(self) -> None:
         """Schema creation belongs to ``python -m vortex migrate``; at runtime only check it happened."""
-        found = self.execute("SELECT to_regclass(?) AS t", (f'"{self.schema}".tasks',)).fetchone()
-        if found is None or found["t"] is None:
-            raise RuntimeError(f"schema {self.schema} is missing; run: python -m vortex migrate")
+        for table in ("tasks", "agent_keys"):  # the first table, and the most recently added one
+            found = self.execute("SELECT to_regclass(?) AS t", (f'"{self.schema}".{table}',)).fetchone()
+            if found is None or found["t"] is None:
+                raise RuntimeError(
+                    f"schema {self.schema} is missing or out of date; run: python -m vortex migrate"
+                )
 
     def close(self) -> None:
         self._conn.close()

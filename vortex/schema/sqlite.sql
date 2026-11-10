@@ -69,3 +69,11 @@ CREATE TABLE IF NOT EXISTS outbox (
     sent_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_unsent ON outbox(sent_at, outbox_id);
+-- Per-agent API keys (apikey auth mode). Only sha256(key) in hex is stored; the key itself never is.
+CREATE TABLE IF NOT EXISTS agent_keys (
+    key_hash TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_keys_agent ON agent_keys(agent_id);

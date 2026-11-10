@@ -26,7 +26,43 @@ class MigrateTests(unittest.TestCase):
     def test_apply_is_idempotent(self):
         apply(PG_URL, self.schema)
         apply(PG_URL, self.schema)
-        self.assertTrue({"agents", "tasks", "messages", "task_events", "operator_actions"} <= self._tables())
+        self.assertTrue(
+            {"agents", "tasks", "messages", "task_events", "operator_actions", "agent_keys"} <= self._tables()
+        )
+
+    def test_store_refuses_a_schema_migrated_before_agent_keys(self):
+        apply(PG_URL, self.schema)
+        with self.psycopg.connect(PG_URL, autocommit=True) as admin:
+            admin.execute(f'DROP TABLE "{self.schema}".agent_keys')
+        with self.assertRaisesRegex(RuntimeError, "python -m vortex migrate"):
+            VortexStore(PG_URL, schema=self.schema)
+        apply(PG_URL, self.schema)  # re-running migrate adds the table without touching the rest
+        store = VortexStore(PG_URL, schema=self.schema)
+        self.addCleanup(store.close)
+        self.assertEqual(store.agent_for_key(store.issue_key("hermes-1")), "hermes-1")
+
+    def test_writer_can_issue_look_up_and_revoke_keys(self):
+        apply(PG_URL, self.schema)
+        role = "vw_" + uuid.uuid4().hex[:12]
+        with self.psycopg.connect(PG_URL, autocommit=True) as admin:
+            admin.execute(f"CREATE ROLE {role} LOGIN IN ROLE vortex_writer")
+        self.addCleanup(self._drop_role, role)
+        store = VortexStore(PG_URL.replace("postgres@", f"{role}@", 1), schema=self.schema)
+        self.addCleanup(store.close)
+        key = store.issue_key("hermes-1")
+        self.assertEqual(store.agent_for_key(key), "hermes-1")
+        self.assertEqual(store.revoke_keys("hermes-1"), 1)
+        self.assertIsNone(store.agent_for_key(key))
+
+    def test_agent_keys_text_columns_use_c_collation(self):
+        apply(PG_URL, self.schema)
+        with self.psycopg.connect(PG_URL) as conn:
+            rows = conn.execute(
+                "SELECT column_name, collation_name FROM information_schema.columns"
+                " WHERE table_schema=%s AND table_name='agent_keys'", (self.schema,)
+            ).fetchall()
+        self.assertEqual({r[0] for r in rows}, {"key_hash", "agent_id", "created_at", "revoked_at"})
+        self.assertEqual({r[1] for r in rows}, {"C"})
 
     def test_writer_cannot_run_ddl(self):
         apply(PG_URL, self.schema)

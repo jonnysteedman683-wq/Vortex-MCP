@@ -1,7 +1,11 @@
 """SQLite persistence for Vortex agent presence and messages."""
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import re
+import secrets
 import threading
 import uuid
 from collections.abc import Mapping
@@ -22,6 +26,17 @@ DEFAULT_AGENTS = {
     agent_id: _DEFAULT_AGENT_LABELS.get(agent_id, agent_id.replace("-", " ").title())
     for agent_id in DEFAULT_AGENT_IDS
 }
+logger = logging.getLogger("vortex.store")
+
+# An agent API key: "vtx_" + secrets.token_urlsafe(32), which is always 43 URL-safe characters.
+KEY_PREFIX = "vtx_"
+KEY_PATTERN = re.compile(r"vtx_[A-Za-z0-9_-]{43}")
+
+
+def _key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode("ascii")).hexdigest()
+
+
 MAX_MESSAGE_CHARS = 8000
 MAX_TASK_GOAL_CHARS = 4000
 MAX_TASK_RESULT_CHARS = 8000
@@ -1124,6 +1139,57 @@ class VortexStore:
         for entry in entries:
             entry["details"] = json.loads(entry.pop("details_json"))
         return entries
+
+    # Agent API keys. Only sha256(key) is stored; a key, or a hash in full, is never logged or returned
+    # (except the key itself, once, from issue_key).
+    def issue_key(self, agent_id: str) -> str:
+        """Create a new active key for a known agent and return it: the only time the key exists here."""
+        key = KEY_PREFIX + secrets.token_urlsafe(32)
+        digest = _key_hash(key)
+        with self._lock, self._db.transaction():
+            if not isinstance(agent_id, str) or self._get_agent(self._db, agent_id) is None:
+                raise ValueError("Unknown agent identity")
+            self._db.execute(
+                "INSERT INTO agent_keys(key_hash,agent_id,created_at) VALUES(?,?,?)",
+                (digest, agent_id, iso(utc_now())),
+            )
+        logger.info("issued an API key for %s (hash prefix %s)", agent_id, digest[:8])
+        return key
+
+    def revoke_keys(self, agent_id: str) -> int:
+        """Revoke every active key of ``agent_id``; return how many were revoked."""
+        if not isinstance(agent_id, str):
+            return 0
+        with self._lock, self._db.transaction():
+            active = self._db.execute(
+                "SELECT COUNT(*) AS n FROM agent_keys WHERE agent_id=? AND revoked_at IS NULL", (agent_id,)
+            ).fetchone()["n"]
+            self._db.execute(
+                "UPDATE agent_keys SET revoked_at=? WHERE agent_id=? AND revoked_at IS NULL",
+                (iso(utc_now()), agent_id),
+            )
+        logger.info("revoked %d API key(s) for %s", active, agent_id)
+        return int(active)
+
+    def agent_for_key(self, key: str) -> str | None:
+        """The agent an active key belongs to, or None. The key is hashed, then looked up by that hash:
+        raw keys are never compared, and anything not shaped like a key is refused without a query."""
+        if not isinstance(key, str) or not KEY_PATTERN.fullmatch(key):
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT agent_id FROM agent_keys WHERE key_hash=? AND revoked_at IS NULL", (_key_hash(key),)
+            ).fetchone()
+        return None if row is None else row["agent_id"]
+
+    def list_keys(self) -> list[dict[str, Any]]:
+        """Every key, active or revoked, identified by the first 8 hex digits of its hash only."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT agent_id, created_at, revoked_at, substr(key_hash, 1, 8) AS hash_prefix"
+                " FROM agent_keys ORDER BY agent_id, created_at, key_hash"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def acquire_relay_lock(self) -> None:
         """On Postgres, refuse to run if another relay already serves this schema."""
