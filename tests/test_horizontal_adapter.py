@@ -4,6 +4,7 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
 from unittest.mock import patch
 
 from mcp.server.auth.provider import AccessToken
@@ -26,7 +27,7 @@ GATEWAY_TOKEN = "citadel-test-token"
 
 
 class StubGateway(BaseHTTPRequestHandler):
-    calls: list = []
+    calls: ClassVar[list] = []
 
     def log_message(self, *args):
         pass

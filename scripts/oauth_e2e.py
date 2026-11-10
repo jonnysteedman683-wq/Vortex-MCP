@@ -24,7 +24,8 @@ SECRETS_FILE = os.environ.get("VORTEX_E2E_SECRETS", "client_secrets.json")
 CA_PEM = os.environ.get("VORTEX_E2E_CA", "ca.pem")
 BASE = os.environ.get("VORTEX_E2E_MCP_URL", "http://localhost:8000/mcp")
 
-sec = json.load(open(SECRETS_FILE))
+with open(SECRETS_FILE) as fh:
+    sec = json.load(fh)
 KC_CTX = ssl.create_default_context(cafile=CA_PEM)
 RESULTS = []
 
@@ -90,7 +91,7 @@ def call_tool(name, args, token, sess, rid=10):
         raw = next(l[6:] for l in raw.splitlines() if l.startswith("data: "))
     try:
         j = json.loads(raw)
-    except Exception:
+    except json.JSONDecodeError:
         return st, None, r[:300]
     if "error" in j:
         return st, None, j["error"]
@@ -102,7 +103,7 @@ def call_tool(name, args, token, sess, rid=10):
     for t in texts:
         try:
             parsed.append(json.loads(t))
-        except Exception:
+        except json.JSONDecodeError:
             parsed.append(t)
     return st, parsed, None
 

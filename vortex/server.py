@@ -9,13 +9,13 @@ from urllib.parse import urlparse
 
 import anyio
 from dotenv import load_dotenv
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response, StreamingResponse
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from .auth import IntrospectionTokenVerifier
 from .settings import AGENT_IDS, Settings
@@ -479,7 +479,7 @@ def _spine_assignee(organ_id: str, agent_ids: tuple[str, ...] | set[str]) -> str
         "vortex-desktop": "hermes-1",
         "hermes": "hermes-1",
     }.get(organ_id, "hermes-2")
-    return preferred if preferred in agent_ids else sorted(agent_ids)[0]
+    return preferred if preferred in agent_ids else min(agent_ids)
 
 
 def run() -> None:

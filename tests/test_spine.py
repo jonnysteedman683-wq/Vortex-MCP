@@ -49,9 +49,11 @@ class SpineSurveyTests(unittest.TestCase):
         self.assertEqual(rows, [{"id": "citadel", "role": "memory", "status": "LIVE", "canon": "yes"}])
         self.assertEqual(len(digest), 64)
         self.assertNotIn(str(self.root), json.dumps(rows))
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(ValueError, "not configured"):
-                survey_organs()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            self.assertRaisesRegex(ValueError, "not configured"),
+        ):
+            survey_organs()
 
     def test_missing_sentinel_is_degraded_and_generates_read_only_goal(self) -> None:
         self.write_registry([{
@@ -151,7 +153,7 @@ class SpineServerToolTests(unittest.TestCase):
         self.addCleanup(self.store.close)
 
     def invoke(self, tool_name: str, **arguments: object) -> object:
-        tool = next(item for item in self.server._tool_manager.list_tools() if item.name == tool_name)
+        next(item for item in self.server._tool_manager.list_tools() if item.name == tool_name)
         access = type("Access", (), {"client_id": "hermes-1"})()
         with patch("vortex.server.get_access_token", return_value=access):
             return asyncio.run(self.server._tool_manager.call_tool(tool_name, arguments))

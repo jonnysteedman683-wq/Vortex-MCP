@@ -5,7 +5,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +30,11 @@ MAX_TASK_LEASE_SECONDS = 3600
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return value.astimezone(UTC).isoformat(timespec="seconds")
 
 
 TASK_STATUSES = ("open", "in_progress", "blocked", "completed", "cancelled")
@@ -297,10 +297,10 @@ class VortexStore:
         requires_approval: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(requires_approval, bool):
-            raise ValueError("requires_approval must be a boolean")
+            raise ValueError("requires_approval must be a boolean")  # noqa: TRY004 - ValueError is the API contract
         needs_approval = self._approval_required(assigned_to, requires_approval)
         if not isinstance(goal, str):
-            raise ValueError("Task goal must be a string")
+            raise ValueError("Task goal must be a string")  # noqa: TRY004 - ValueError is the API contract
         goal = goal.strip()
         if not goal:
             raise ValueError("Task goal must not be empty")
@@ -494,7 +494,7 @@ class VortexStore:
         lease_seconds: int = DEFAULT_TASK_LEASE_SECONDS,
     ) -> dict[str, Any]:
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int):
-            raise ValueError("Lease duration must be an integer")
+            raise ValueError("Lease duration must be an integer")  # noqa: TRY004 - ValueError is the API contract
         if not 30 <= lease_seconds <= MAX_TASK_LEASE_SECONDS:
             raise ValueError(f"Lease duration must be between 30 and {MAX_TASK_LEASE_SECONDS} seconds")
         with self._lock, self._db:
@@ -1110,7 +1110,7 @@ class VortexStore:
         if len(reason) > MAX_APPROVAL_NOTE_CHARS:
             raise ValueError(f"Reason must be at most {MAX_APPROVAL_NOTE_CHARS} characters")
         if not isinstance(cancel_active, bool):
-            raise ValueError("cancel_active must be a boolean")
+            raise ValueError("cancel_active must be a boolean")  # noqa: TRY004 - ValueError is the API contract
         if agent_id == operator_id:
             raise ValueError("An operator cannot pause its own identity")
         reason = reason.strip()

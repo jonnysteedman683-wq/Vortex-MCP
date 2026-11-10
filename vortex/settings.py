@@ -115,7 +115,7 @@ class Settings:
         return self.identity_clients
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         mode = os.getenv("VORTEX_AUTH_MODE", "development").strip().lower()
         host = os.getenv("VORTEX_HOST", "127.0.0.1").strip()
         port = int(os.getenv("VORTEX_PORT", "8000"))

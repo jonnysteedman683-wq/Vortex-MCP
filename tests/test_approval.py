@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from mcp.server.auth.provider import AccessToken
+from mcp.server.fastmcp.exceptions import ToolError
 
 from vortex.server import create_server
 from vortex.settings import Settings
@@ -192,17 +193,19 @@ class ApprovalSettingsTests(unittest.TestCase):
         ):
             self.assertEqual(Settings.from_env().approval_required_for, ("hermes-2", "spark-1"))
         for bad in ("ghost", "*,hermes-2", "hermes-2,hermes-2"):
-            with self.subTest(policy=bad):
-                with patch.dict(
-                    os.environ, self.env(VORTEX_OPERATOR_IDS=OP, VORTEX_APPROVAL_REQUIRED_FOR=bad), clear=True
-                ):
-                    with self.assertRaises(RuntimeError):
-                        Settings.from_env()
+            with (
+                self.subTest(policy=bad),
+                patch.dict(os.environ, self.env(VORTEX_OPERATOR_IDS=OP, VORTEX_APPROVAL_REQUIRED_FOR=bad), clear=True),
+                self.assertRaises(RuntimeError),
+            ):
+                Settings.from_env()
 
     def test_policy_without_an_operator_is_rejected(self):
-        with patch.dict(os.environ, self.env(VORTEX_APPROVAL_REQUIRED_FOR="*"), clear=True):
-            with self.assertRaises(RuntimeError):
-                Settings.from_env()
+        with (
+            patch.dict(os.environ, self.env(VORTEX_APPROVAL_REQUIRED_FOR="*"), clear=True),
+            self.assertRaises(RuntimeError),
+        ):
+            Settings.from_env()
 
 
 class ApprovalServerTests(unittest.TestCase):
@@ -245,7 +248,7 @@ class ApprovalServerTests(unittest.TestCase):
         task = self.call("hermes-1", "vortex_create_task", {
             "goal": "migrate db", "assigned_to": "spark-1", "requires_approval": True,
         })
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(ToolError, "awaiting operator approval"):
             self.call("spark-1", "vortex_claim_task", {"task_id": task["task_id"]})
         pending = self.call(OP, "vortex_operator_list_pending_approvals")
         self.assertEqual([t["task_id"] for t in pending], [task["task_id"]])

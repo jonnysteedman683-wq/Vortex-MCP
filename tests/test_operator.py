@@ -167,14 +167,16 @@ class OperatorSettingsTests(unittest.TestCase):
     def test_operator_must_be_a_configured_agent(self):
         with patch.dict(os.environ, self.env(VORTEX_OPERATOR_IDS="claude-operator"), clear=True):
             self.assertEqual(Settings.from_env().operator_ids, ("claude-operator",))
-        with patch.dict(os.environ, self.env(VORTEX_OPERATOR_IDS="intruder"), clear=True):
-            with self.assertRaises(RuntimeError):
-                Settings.from_env()
-        with patch.dict(
-            os.environ, self.env(VORTEX_OPERATOR_IDS="claude-operator,claude-operator"), clear=True
+        with (
+            patch.dict(os.environ, self.env(VORTEX_OPERATOR_IDS="intruder"), clear=True),
+            self.assertRaises(RuntimeError),
         ):
-            with self.assertRaises(RuntimeError):
-                Settings.from_env()
+            Settings.from_env()
+        with (
+            patch.dict(os.environ, self.env(VORTEX_OPERATOR_IDS="claude-operator,claude-operator"), clear=True),
+            self.assertRaises(RuntimeError),
+        ):
+            Settings.from_env()
 
 
 class OperatorServerTests(unittest.TestCase):

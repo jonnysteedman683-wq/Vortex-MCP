@@ -83,10 +83,12 @@ def http_caller(url: str, token: str) -> Caller:
     from mcp.client.streamable_http import streamablehttp_client
 
     async def call(tool: str, args: dict[str, Any]) -> Any:
-        async with streamablehttp_client(url, headers={"Authorization": f"Bearer {token}"}) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(tool, args)
+        async with (
+            streamablehttp_client(url, headers={"Authorization": f"Bearer {token}"}) as (read, write, _),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool(tool, args)
         # Unwrap outside the client's task groups: raising inside them would turn a
         # VortexError into an ExceptionGroup that callers cannot catch by type.
         return _unwrap(result)
@@ -157,7 +159,7 @@ class VortexAgent:
             return "blocked"
         try:
             result = await self._run_handler(handler, args)
-        except Exception as exc:  # report every handler failure to the operator
+        except Exception as exc:  # noqa: BLE001 - report every handler failure to the operator
             await self.call("vortex_update_task", task_id=task_id, status="blocked",
                             blocked_reason=_truncate(f"{type(exc).__name__}: {exc}", MAX_REASON_CHARS))
             return "blocked"
