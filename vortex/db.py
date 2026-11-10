@@ -1,9 +1,10 @@
 """Database layer under VortexStore: one interface, a SQLite and a Postgres backend."""
 from __future__ import annotations
 
+import re
 import sqlite3
-from collections.abc import Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager, suppress
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -121,8 +122,103 @@ class SqliteDatabase:
         return getattr(self._conn, name)
 
 
+SCHEMA_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+
+
+def check_schema_name(schema: str) -> str:
+    if not isinstance(schema, str) or not SCHEMA_NAME.fullmatch(schema):
+        raise ValueError("schema name must match ^[a-z_][a-z0-9_]{0,62}$")
+    return schema
+
+
+def to_pyformat(sql: str) -> str:
+    """Rewrite ``?`` placeholders to ``%s`` outside quoted literals and escape literal ``%``."""
+    out: list[str] = []
+    quote: str | None = None
+    for ch in sql:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "?":
+            out.append("%s")
+            continue
+        out.append("%%" if ch == "%" else ch)
+    return "".join(out)
+
+
+class PostgresDatabase:
+    """Postgres backend. Use a direct or session-mode connection: the search path (and the instance
+    lock) live on the session, which a transaction-mode pooler would drop between statements."""
+
+    dialect: Literal["postgres"] = "postgres"
+
+    def __init__(self, url: str, *, schema: str):
+        import psycopg  # imported here so SQLite-only installs never need it
+
+        self._psycopg = psycopg
+        self._url = url
+        self.schema = check_schema_name(schema)
+        self._depth = 0
+        self._conn = self._connect()
+
+    def _connect(self) -> Any:
+        from psycopg.rows import dict_row
+
+        try:
+            conn = self._psycopg.connect(self._url, autocommit=True, row_factory=dict_row, connect_timeout=10)
+        except self._psycopg.OperationalError:
+            raise ConnectionError("database unavailable") from None
+        conn.execute(f'SET search_path TO "{self.schema}"')
+        return conn
+
+    def _reconnect(self) -> None:
+        with suppress(Exception):  # the old connection is already broken
+            self._conn.close()
+        self._conn = self._connect()
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
+        query = to_pyformat(sql)
+        try:
+            return self._conn.execute(query, tuple(params))
+        except self._psycopg.OperationalError:
+            if self._depth:
+                # Inside a transaction a retry would silently drop the earlier statements.
+                raise ConnectionError("database unavailable") from None
+            self._reconnect()
+            try:
+                return self._conn.execute(query, tuple(params))
+            except self._psycopg.OperationalError:
+                raise ConnectionError("database unavailable") from None
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        if self._depth == 0 and (self._conn.closed or self._conn.broken):
+            self._reconnect()
+        self._depth += 1
+        try:
+            with self._conn.transaction():
+                yield
+        finally:
+            self._depth -= 1
+
+    def prepare(self) -> None:
+        """Schema creation belongs to ``python -m vortex migrate``; nothing to do at runtime."""
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self) -> None:
+        self._tx = self.transaction()
+        return self._tx.__enter__()
+
+    def __exit__(self, *exc: object) -> Any:
+        return self._tx.__exit__(*exc)
+
+
 def open_database(target: str, *, schema: str = "forge") -> Database:
     """A ``postgresql://`` URL opens Postgres; anything else is a SQLite path (or ``:memory:``)."""
     if target.startswith(POSTGRES_PREFIXES):
-        raise NotImplementedError("Postgres backend is not available yet")
+        return PostgresDatabase(target, schema=schema)
     return SqliteDatabase(target)

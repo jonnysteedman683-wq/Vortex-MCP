@@ -4,9 +4,9 @@ import unittest
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 
+from tests.backends import make_store
 from vortex.server import DevelopmentTokenVerifier, create_server
 from vortex.settings import Settings
-from vortex.store import VortexStore
 
 
 class ServerAuthTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class ServerAuthTests(unittest.TestCase):
                 "hermes-1": "a", "hermes-2": "b", "antigravity-1": "c", "spark-1": "d",
             },
         )
-        store = VortexStore(":memory:")
+        store = make_store(":memory:")
         server = create_server(store, settings)
         self.assertIsInstance(server.settings.auth, AuthSettings)
         self.assertTrue(server.settings.auth.validate_token_resource)
@@ -43,7 +43,7 @@ class ServerAuthTests(unittest.TestCase):
                 "hermes-1": "a", "hermes-2": "b", "antigravity-1": "c", "spark-1": "d",
             },
         )
-        store = VortexStore(":memory:")
+        store = make_store(":memory:")
         server = create_server(store, settings)
         tool_names = {tool.name for tool in server._tool_manager.list_tools()}
         self.assertTrue({
@@ -67,7 +67,7 @@ class ServerAuthTests(unittest.TestCase):
                 "hermes-1": "a", "hermes-2": "b", "antigravity-1": "c", "spark-1": "d",
             },
         )
-        store = VortexStore(":memory:")
+        store = make_store(":memory:")
         server = create_server(store, settings)
         security = server.settings.transport_security
         self.assertIn("127.0.0.1:8123", security.allowed_hosts)
@@ -89,7 +89,7 @@ class ServerAuthTests(unittest.TestCase):
                 "hermes-1": "a", "hermes-2": "b", "antigravity-1": "c", "spark-1": "d",
             },
         )
-        store = VortexStore(":memory:")
+        store = make_store(":memory:")
         server = create_server(store, settings)
         self.assertEqual(server._token_verifier.resource_url, "http://[::1]:8124/mcp")
         self.assertIn("http://[::1]:8124", server.settings.transport_security.allowed_origins)

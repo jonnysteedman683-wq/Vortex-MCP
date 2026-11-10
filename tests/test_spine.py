@@ -9,10 +9,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.backends import make_store
 from vortex.server import create_server
 from vortex.settings import Settings
 from vortex.spine import advisory_task_goals, classify, survey_organs
-from vortex.store import VortexStore
 
 
 class SpineSurveyTests(unittest.TestCase):
@@ -144,7 +144,7 @@ class SpineSurveyTests(unittest.TestCase):
 
 class SpineServerToolTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.store = VortexStore(":memory:")
+        self.store = make_store(":memory:")
         settings = Settings(
             auth_mode="development", host="127.0.0.1", port=8000, data_dir=":memory:",
             development_tokens={"hermes-1": "a", "hermes-2": "b", "antigravity-1": "c", "spark-1": "d"},

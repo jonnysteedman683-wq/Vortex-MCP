@@ -10,11 +10,11 @@ from unittest.mock import patch
 
 from mcp.server.auth.provider import AccessToken
 
+from tests.backends import make_store
 from vortex.adapters.sentinel import FirebaseIdTokens, SentinelClient, build_agent
 from vortex.sdk import VortexAgent, VortexError, make_goal
 from vortex.server import create_server
 from vortex.settings import Settings
-from vortex.store import VortexStore
 
 AGENTS = ("hermes-1", "sentinel-1", "claude-operator")
 OP = "claude-operator"
@@ -74,7 +74,7 @@ class SentinelAdapterTests(unittest.TestCase):
         self.addCleanup(self.httpd.server_close)
         self.addCleanup(self.httpd.shutdown)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
-        self.store = VortexStore(":memory:", agents={a: a for a in AGENTS})
+        self.store = make_store(":memory:", agents={a: a for a in AGENTS})
         self.addCleanup(self.store.close)
         self.server = create_server(self.store, Settings(
             auth_mode="development", host="127.0.0.1", port=8000, data_dir=".vortex-data",

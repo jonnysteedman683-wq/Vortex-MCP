@@ -4,13 +4,14 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from tests.backends import make_store, sqlite_only
 from vortex.store import VortexStore
 
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
-        self.store = VortexStore(Path(self.temp.name) / "test.sqlite3")
+        self.store = make_store(Path(self.temp.name) / "test.sqlite3")
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(self.store.close)
 
@@ -58,6 +59,7 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.inbox("spark-1", after_message_id="missing")
 
+    @sqlite_only
     def test_initialize_removes_redundant_inbox_index(self):
         with self.store._db:
             self.store._db.execute(
@@ -72,6 +74,7 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn("idx_messages_inbox", indexes)
         self.assertIn("idx_messages_inbox_cursor", indexes)
 
+    @sqlite_only
     def test_pending_approval_index_matches_filter_and_order(self):
         with self.store._db:
             self.store._db.execute(
@@ -295,6 +298,7 @@ class StoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.get_task("spark-1", task["task_id"])["goal"], "Available for a worker")
 
+    @sqlite_only
     def test_list_tasks_loads_dependencies_in_one_query(self):
         parent = self.store.create_task("hermes-1", "Parent")
         self.store.create_task("hermes-1", "Child one", depends_on=[parent["task_id"]])
@@ -336,6 +340,7 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.store.send("antigravity-1", "spark-1", "Unauthorized", task_id=task["task_id"])
 
+    @sqlite_only
     def test_existing_message_database_is_migrated_with_nullable_task_link(self):
         with TemporaryDirectory() as directory:
             database = Path(directory) / "legacy.sqlite3"
@@ -386,7 +391,7 @@ if __name__ == "__main__":
 class TextValidationTests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
-        self.store = VortexStore(Path(self.temp.name) / "test.sqlite3")
+        self.store = make_store(Path(self.temp.name) / "test.sqlite3")
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(self.store.close)
 

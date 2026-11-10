@@ -10,16 +10,16 @@ from unittest.mock import patch
 from mcp.server.auth.provider import AccessToken
 from mcp.server.fastmcp.exceptions import ToolError
 
+from tests.backends import make_store, sqlite_only
 from vortex.server import create_server
 from vortex.settings import Settings
-from vortex.store import VortexStore
 
 AGENTS = ("hermes-1", "hermes-2", "spark-1", "claude-operator")
 OP = "claude-operator"
 
 
 def _store(path, policy=None):
-    return VortexStore(path, agents={a: a for a in AGENTS}, approval_required_for=policy)
+    return make_store(path, agents={a: a for a in AGENTS}, approval_required_for=policy)
 
 
 class ApprovalStoreTests(unittest.TestCase):
@@ -139,6 +139,7 @@ class ApprovalPolicyTests(unittest.TestCase):
         self.assertEqual(store.create_task("hermes-1", "a", assigned_to="hermes-2")["approval_state"], "pending")
         self.assertEqual(store.create_task("hermes-1", "b", assigned_to="spark-1")["approval_state"], "not_required")
 
+    @sqlite_only
     def test_existing_database_is_migrated_and_old_tasks_stay_claimable(self):
         with TemporaryDirectory() as temp:
             path = Path(temp) / "old.sqlite3"
