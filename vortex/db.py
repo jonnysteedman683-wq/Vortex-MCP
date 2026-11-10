@@ -17,6 +17,15 @@ def schema_sql(name: str) -> str:
     return resources.files("vortex").joinpath("schema", name).read_text(encoding="utf-8")
 
 
+def check_params(params: Sequence[Any]) -> tuple[Any, ...]:
+    """Postgres TEXT cannot hold NUL. Reject it for every parameter on every backend, as a ValueError."""
+    values = tuple(params)
+    for value in values:
+        if isinstance(value, str) and "\x00" in value:
+            raise ValueError("text must not contain NUL characters")
+    return values
+
+
 class Cursor(Protocol):
     def fetchone(self) -> Any: ...
 
@@ -54,7 +63,7 @@ class SqliteDatabase:
             self._conn.execute("PRAGMA journal_mode = WAL")
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
-        return self._conn.execute(sql, tuple(params))
+        return self._conn.execute(sql, check_params(params))
 
     def transaction(self) -> AbstractContextManager[Any]:
         # sqlite3's connection context manager commits on success and rolls back on error.
@@ -122,6 +131,7 @@ class SqliteDatabase:
         return getattr(self._conn, name)
 
 
+STATEMENT_TIMEOUT = "30s"
 SCHEMA_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
@@ -169,10 +179,15 @@ class PostgresDatabase:
         from psycopg.rows import dict_row
 
         try:
-            conn = self._psycopg.connect(self._url, autocommit=True, row_factory=dict_row, connect_timeout=10)
+            conn = self._psycopg.connect(
+                self._url, autocommit=True, row_factory=dict_row, connect_timeout=10,
+                # Detect a silently dropped connection (NAT idle timeout) instead of blocking forever.
+                keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+            )
         except self._psycopg.OperationalError:
             raise ConnectionError("database unavailable") from None
         conn.execute(f'SET search_path TO "{self.schema}"')
+        conn.execute(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'")
         return conn
 
     def _reconnect(self) -> None:
@@ -183,11 +198,16 @@ class PostgresDatabase:
             # Another server took over while we were disconnected: stop writing for good.
             self._lock_lost = True
 
-    def _try_lock(self) -> bool:
+    def _try_lock(self, name: str = "vortex") -> bool:
         row = self._conn.execute(
-            "SELECT pg_try_advisory_lock(hashtext(%s)) AS ok", ("vortex:" + self.schema,)
+            "SELECT pg_try_advisory_lock(hashtext(%s)) AS ok", (f"{name}:{self.schema}",)
         ).fetchone()
         return bool(row["ok"])
+
+    def acquire_relay_lock(self) -> None:
+        """Hold a separate session lock so only one relay copies this schema's outbox."""
+        if not self._try_lock("vortex-relay"):
+            raise RuntimeError(f"another Vortex relay is already running for schema {self.schema}")
 
     def _lost(self) -> RuntimeError:
         return RuntimeError(f"another Vortex server is already using schema {self.schema}")
@@ -201,6 +221,7 @@ class PostgresDatabase:
     def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
         if self._lock_lost:
             raise self._lost()
+        params = check_params(params)
         query = to_pyformat(sql)
         try:
             return self._conn.execute(query, tuple(params))
@@ -216,6 +237,11 @@ class PostgresDatabase:
             except self._psycopg.OperationalError:
                 raise ConnectionError("database unavailable") from None
 
+    def _begin(self) -> Any:
+        tx = self._conn.transaction()
+        tx.__enter__()
+        return tx
+
     @contextmanager
     def transaction(self) -> Iterator[None]:
         if self._lock_lost:
@@ -224,12 +250,28 @@ class PostgresDatabase:
             self._reconnect()
             if self._lock_lost:
                 raise self._lost()
+        try:
+            tx = self._begin()
+        except self._psycopg.OperationalError:
+            if self._depth:
+                raise ConnectionError("database unavailable") from None
+            # Nothing has been written yet, so reconnecting and retrying BEGIN once is safe.
+            self._reconnect()
+            if self._lock_lost:
+                raise self._lost() from None
+            try:
+                tx = self._begin()
+            except self._psycopg.OperationalError:
+                raise ConnectionError("database unavailable") from None
         self._depth += 1
         try:
-            with self._conn.transaction():
-                yield
-        finally:
+            yield
+        except BaseException as exc:
             self._depth -= 1
+            tx.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        self._depth -= 1
+        tx.__exit__(None, None, None)
 
     def prepare(self) -> None:
         """Schema creation belongs to ``python -m vortex migrate``; at runtime only check it happened."""

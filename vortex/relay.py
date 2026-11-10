@@ -23,6 +23,10 @@ KEY = "outbox/{outbox_id}"
 log = logging.getLogger("vortex.relay")
 
 
+class RelayConflict(RuntimeError):
+    """The ledger already holds this outbox key for a different event (e.g. ids restarted)."""
+
+
 class LedgerLike(Protocol):
     def post(self, sender: str, kind: str, task_id: str = "", **body: Any) -> Any: ...
 
@@ -34,16 +38,21 @@ def relay_once(store: VortexStore, ledger: LedgerLike, *, batch: int = 100) -> i
     rows = store.outbox_unsent(batch)
     if not rows:
         return 0
+    # A remote ledger (SupabaseLedger) only knows what it has synced; read the shared head first.
+    sync = getattr(ledger, "sync", None)
+    if callable(sync):
+        sync()
     already = ledger.memory(SCOPE)
     marked = 0
     for row in rows:
         key = KEY.format(outbox_id=row["outbox_id"])
+        value = {"kind": row["event_kind"], **row["payload"]}
+        if key in already and already[key] != value:
+            # Same key, different event: outbox ids restarted. Never mark it sent unrelayed.
+            raise RelayConflict(f"ledger already holds {key} for a different event")
         if key not in already:
             try:
-                ledger.post(
-                    SENDER, "memory.write", key=key, scope=SCOPE,
-                    value={"kind": row["event_kind"], **row["payload"]},
-                )
+                ledger.post(SENDER, "memory.write", key=key, scope=SCOPE, value=value)
             except Exception as exc:
                 exc.outbox_id = row["outbox_id"]  # type: ignore[attr-defined]
                 raise
@@ -86,8 +95,24 @@ def main() -> int:
     if missing:
         print("missing environment: " + ", ".join(missing))
         return 2
+    from .settings import parse_store
+
+    try:
+        # Same validation as the server: a typo must not become a SQLite file named after the URL.
+        url, schema = parse_store()
+    except RuntimeError as exc:
+        print(exc)
+        return 2
+    if url is None:
+        print("VORTEX_STORE_URL must be a postgresql:// connection string")
+        return 2
     logging.basicConfig(level=logging.INFO)
-    store = VortexStore(os.environ["VORTEX_STORE_URL"], schema=os.environ.get("VORTEX_SCHEMA", "forge"))
+    store = VortexStore(url, schema=schema)
+    try:
+        store.acquire_relay_lock()
+    except RuntimeError as exc:
+        print(exc)
+        return 3
     ledger = SupabaseLedger(url=os.environ["UNISYNC_GATEWAY_URL"], key=os.environ["UNISYNC_VORTEX_TOKEN"])
     run(store, ledger)
     return 0

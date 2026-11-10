@@ -126,3 +126,89 @@ class RealLedgerTests(unittest.TestCase):
         self.assertEqual(len(view), sent)
         self.assertTrue(all(k.startswith("outbox/") for k in view))
         self.assertEqual(relay.relay_once(self.store, self.ledger), 0)
+
+
+class TableBackedSupabaseLedger:
+    """A real lestinxor SupabaseLedger whose HTTP layer is an in-memory events table."""
+
+    @staticmethod
+    def make(table):
+        from urllib.parse import parse_qs, urlsplit
+
+        from lestinxor.unisync_supabase import SupabaseLedger
+
+        ledger = SupabaseLedger(url="https://example.invalid", key="test-key-not-real")
+
+        def request(method, url, payload=None, extra=None):
+            if method == "POST":
+                if any(r["seq"] == payload["seq"] for r in table):
+                    import urllib.error
+
+                    raise urllib.error.HTTPError(url, 409, "conflict", {}, None)
+                table.append(dict(payload))
+                return None
+            start = int(parse_qs(urlsplit(url).query)["seq"][0].split(".", 1)[1])
+            return [r for r in table if r["seq"] >= start]
+
+        ledger._request = request
+        return ledger
+
+
+class SupabaseRelayTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            import lestinxor.unisync_supabase  # noqa: F401
+        except ImportError:  # pragma: no cover - lestinxor is in the dev group
+            self.skipTest("lestinxor not installed")
+        self.store = make_store(agents={a: a for a in AGENTS})
+        self.addCleanup(self.store.close)
+        self.table = []
+
+    def _keys(self):
+        return [r["body"]["key"] for r in self.table if r["kind"] == "memory.write"]
+
+    def test_restart_after_crash_does_not_repost(self):
+        self.store.create_task("hermes-1", "one", assigned_to="hermes-2")
+        self.store.create_task("hermes-1", "two", assigned_to="hermes-2")
+        first = TableBackedSupabaseLedger.make(self.table)
+        with patch.object(self.store, "outbox_mark_sent", side_effect=RuntimeError("crash")), \
+                self.assertRaises(RuntimeError):
+            relay.relay_once(self.store, first)
+        restarted = TableBackedSupabaseLedger.make(self.table)  # fresh process: empty local copy
+        relay.relay_once(self.store, restarted)
+        keys = self._keys()
+        self.assertEqual(len(keys), len(set(keys)), keys)
+        self.assertEqual(self.store.outbox_unsent(), [])
+
+    def test_existing_key_with_different_event_is_not_silently_skipped(self):
+        other = make_store(agents={a: a for a in AGENTS})  # ids restart at 1, like a re-migrated schema
+        self.addCleanup(other.close)
+        other.create_task("hermes-1", "older event", assigned_to="hermes-2")
+        ledger = TableBackedSupabaseLedger.make(self.table)
+        relay.relay_once(other, ledger)
+        self.store.create_task("hermes-1", "newer event", assigned_to="hermes-2")
+        with self.assertRaises(relay.RelayConflict):
+            relay.relay_once(self.store, TableBackedSupabaseLedger.make(self.table))
+        self.assertEqual(len(self.store.outbox_unsent()), 1)
+
+
+class RelayMainTests(unittest.TestCase):
+    def test_non_postgres_store_url_is_refused_without_creating_a_file(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "VORTEX_STORE_URL": "mysql://typo/" + "db",
+                "UNISYNC_GATEWAY_URL": "https://example.invalid",
+                "UNISYNC_VORTEX_TOKEN": "not-a-real-token",
+            }
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                with patch.dict(os.environ, env, clear=False):
+                    code = relay.main()
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(code, 2)
+            self.assertEqual(os.listdir(tmp), [])

@@ -1125,6 +1125,11 @@ class VortexStore:
             entry["details"] = json.loads(entry.pop("details_json"))
         return entries
 
+    def acquire_relay_lock(self) -> None:
+        """On Postgres, refuse to run if another relay already serves this schema."""
+        if self._db.dialect == "postgres":
+            self._db.acquire_relay_lock()
+
     def acquire_instance_lock(self) -> None:
         """On Postgres, refuse to run if another Vortex server already uses this schema."""
         if self._db.dialect == "postgres":

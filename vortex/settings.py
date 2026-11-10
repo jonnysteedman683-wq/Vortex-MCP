@@ -92,7 +92,7 @@ def _optional_ca_bundle(name: str) -> str | None:
     return value
 
 
-def _parse_store() -> tuple[str | None, str]:
+def parse_store() -> tuple[str | None, str]:
     url = os.getenv("VORTEX_STORE_URL", "").strip() or None
     if url is not None and not url.startswith(POSTGRES_PREFIXES):
         # Do not echo the value: it may hold a password.
@@ -150,7 +150,7 @@ class Settings:
         agent_ids = _parse_agent_ids()
         operator_ids = _parse_operator_ids(agent_ids)
         approval_required_for = _parse_approval_policy(agent_ids)
-        store_url, schema = _parse_store()
+        store_url, schema = parse_store()
         if approval_required_for and not operator_ids:
             raise RuntimeError(
                 "VORTEX_APPROVAL_REQUIRED_FOR needs at least one VORTEX_OPERATOR_IDS entry to approve tasks"

@@ -395,6 +395,20 @@ class TextValidationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(self.store.close)
 
+    def test_nul_in_ids_and_keys_is_a_value_error_on_every_backend(self):
+        bad = "a\x00b"
+        with self.assertRaises(ValueError):
+            self.store.create_task("hermes-1", "goal", idempotency_key=bad)
+        with self.assertRaises(ValueError):
+            self.store.get_task("hermes-1", bad)
+        with self.assertRaises(ValueError):
+            self.store.send("hermes-1", "spark-1", "hi", reply_to=bad)
+        with self.assertRaises(ValueError):
+            self.store.acknowledge("spark-1", bad)
+        self.assertEqual(self.store.list_tasks("hermes-1"), [])
+        self.store.send("hermes-1", "spark-1", "still works")
+        self.assertEqual(len(self.store.inbox("spark-1")), 1)
+
     def test_nul_characters_are_rejected_before_writing(self):
         with self.assertRaisesRegex(ValueError, "NUL"):
             self.store.send("hermes-1", "spark-1", "a\x00b")
