@@ -145,16 +145,34 @@ def to_pyformat(sql: str) -> str:
     """Rewrite ``?`` placeholders to ``%s`` outside quoted literals and escape literal ``%``."""
     out: list[str] = []
     quote: str | None = None
-    for ch in sql:
-        if quote:
+    comment: str | None = None  # "line" for -- ... newline, "block" for /* ... */
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if comment == "line":
+            if ch == "\n":
+                comment = None
+        elif comment == "block":
+            if sql.startswith("*/", i):
+                out.append("*/")
+                i += 2
+                comment = None
+                continue
+        elif quote:
             if ch == quote:
                 quote = None
+        elif sql.startswith("--", i):
+            comment = "line"
+        elif sql.startswith("/*", i):
+            comment = "block"
         elif ch in ("'", '"'):
             quote = ch
         elif ch == "?":
             out.append("%s")
+            i += 1
             continue
         out.append("%%" if ch == "%" else ch)
+        i += 1
     return "".join(out)
 
 
@@ -184,7 +202,8 @@ class PostgresDatabase:
                 # Detect a silently dropped connection (NAT idle timeout) instead of blocking forever.
                 keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
             )
-        except self._psycopg.OperationalError:
+        except self._psycopg.Error:
+            # Never chain or echo the driver's message: for a malformed URL it quotes parts of it.
             raise ConnectionError("database unavailable") from None
         conn.execute(f'SET search_path TO "{self.schema}"')
         conn.execute(f"SET statement_timeout = '{STATEMENT_TIMEOUT}'")

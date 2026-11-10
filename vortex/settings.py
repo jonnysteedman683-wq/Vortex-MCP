@@ -123,12 +123,12 @@ class Settings:
     oauth_issuer: str | None = None
     oauth_introspection_url: str | None = None
     oauth_client_id: str | None = None
-    oauth_client_secret: str | None = None
+    oauth_client_secret: str | None = field(default=None, repr=False)
     oauth_ca_bundle: str | None = None
     identity_clients: dict[str, str] | None = None
     allowed_hosts: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()
-    development_tokens: dict[str, str] | None = None
+    development_tokens: dict[str, str] | None = field(default=None, repr=False)
     operator_ids: tuple[str, ...] = ()
     approval_required_for: tuple[str, ...] = ()
     # The connection string carries a password: never part of repr, logs or errors.
