@@ -30,19 +30,26 @@ class SettingsTests(unittest.TestCase):
     def test_duplicate_or_missing_local_token_is_rejected(self):
         for values in (self.environment(VORTEX_TOKEN_SPARK_1="dev-token-1"),
                        {k: v for k, v in self.environment().items() if k != "VORTEX_TOKEN_HERMES_2"}):
-            with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
-                with self.assertRaises(RuntimeError):
-                    Settings.from_env()
+            with (
+                self.subTest(values=values),
+                patch.dict(os.environ, values, clear=True),
+                self.assertRaises(RuntimeError),
+            ):
+                Settings.from_env()
 
     def test_dev_server_cannot_bind_public_interface(self):
-        with patch.dict(os.environ, self.environment(VORTEX_HOST="0.0.0.0"), clear=True):
-            with self.assertRaises(RuntimeError):
-                Settings.from_env()
+        with (
+            patch.dict(os.environ, self.environment(VORTEX_HOST="0.0.0.0"), clear=True),
+            self.assertRaises(RuntimeError),
+        ):
+            Settings.from_env()
 
     def test_oauth_mode_fails_closed_until_provider_setup_is_completed(self):
-        with patch.dict(os.environ, self.environment(VORTEX_AUTH_MODE="oauth"), clear=True):
-            with self.assertRaises(RuntimeError):
-                Settings.from_env()
+        with (
+            patch.dict(os.environ, self.environment(VORTEX_AUTH_MODE="oauth"), clear=True),
+            self.assertRaises(RuntimeError),
+        ):
+            Settings.from_env()
 
     def test_custom_agent_ids_are_supported(self):
         env = self.environment(
@@ -103,9 +110,11 @@ class SettingsTests(unittest.TestCase):
             VORTEX_ALLOWED_ORIGINS="https://vortex.example.test",
             VORTEX_OAUTH_CA_BUNDLE="/does/not/exist.pem",
         )
-        with patch.dict(os.environ, env, clear=True):
-            with self.assertRaisesRegex(RuntimeError, "existing file"):
-                Settings.from_env()
+        with (
+            patch.dict(os.environ, env, clear=True),
+            self.assertRaisesRegex(RuntimeError, "existing file"),
+        ):
+            Settings.from_env()
 
     def test_oauth_mode_parses_all_required_fields(self):
         env = self.environment(
@@ -133,9 +142,12 @@ class SettingsTests(unittest.TestCase):
     def test_invalid_mode_and_out_of_range_port_are_rejected(self):
         for values in (self.environment(VORTEX_AUTH_MODE="unknown"),
                        self.environment(VORTEX_PORT="70000")):
-            with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
-                with self.assertRaises(RuntimeError):
-                    Settings.from_env()
+            with (
+                self.subTest(values=values),
+                patch.dict(os.environ, values, clear=True),
+                self.assertRaises(RuntimeError),
+            ):
+                Settings.from_env()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,5 @@
 """Tests proving local MCP auth is loopback-bound and OAuth mode uses provider IDs."""
 import unittest
-from unittest.mock import patch
 
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings

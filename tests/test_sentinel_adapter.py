@@ -5,6 +5,7 @@ import threading
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
 from unittest.mock import patch
 
 from mcp.server.auth.provider import AccessToken
@@ -20,7 +21,7 @@ OP = "claude-operator"
 
 
 class Stub(BaseHTTPRequestHandler):
-    calls: list = []
+    calls: ClassVar[list] = []
     exchanges = 0
 
     def log_message(self, *args):

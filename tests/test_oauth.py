@@ -15,20 +15,20 @@ class IntrospectionVerifierTests(unittest.TestCase):
             self.assertEqual(request.content.decode(), "token=presented-token&token_type_hint=access_token")
             return httpx.Response(200, json=claims)
 
-        values = dict(
-            introspection_url="https://id.example.test/oauth2/introspect",
-            client_id="test-client",
-            client_secret="test-secret",
-            issuer="https://id.example.test/",
-            resource_url="https://vortex.example.test/mcp",
-            identity_clients={
+        values = {
+            "introspection_url": "https://id.example.test/oauth2/introspect",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "issuer": "https://id.example.test/",
+            "resource_url": "https://vortex.example.test/mcp",
+            "identity_clients": {
                 "hermes-1": "client-h1",
                 "hermes-2": "client-h2",
                 "antigravity-1": "client-ag",
                 "spark-1": "client-spark",
             },
-            transport=httpx.MockTransport(handler),
-        )
+            "transport": httpx.MockTransport(handler),
+        }
         values.update(overrides)
         return IntrospectionTokenVerifier(**values)
 
