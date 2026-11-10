@@ -12,10 +12,10 @@ from unittest.mock import patch
 from mcp.server.auth.provider import AccessToken
 from starlette.testclient import TestClient
 
+from tests.backends import make_store, sqlite_only
 from vortex.sdk import VortexAgent, VortexError, make_goal, parse_goal
 from vortex.server import create_server
 from vortex.settings import Settings
-from vortex.store import VortexStore
 from vortex.watcher import WatchState, compute_alerts, notify, poll_once
 
 AGENTS = ("hermes-1", "worker-1", "worker-2", "claude-operator")
@@ -23,7 +23,7 @@ OP = "claude-operator"
 
 
 def _store(path=":memory:", policy=None):
-    return VortexStore(path, agents={a: a for a in AGENTS}, approval_required_for=policy)
+    return make_store(path, agents={a: a for a in AGENTS}, approval_required_for=policy)
 
 
 def _server(store, policy=()):
@@ -104,6 +104,7 @@ class KillSwitchStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.operator_resume_agent(OP, "worker-1")
 
+    @sqlite_only
     def test_old_database_gains_pause_columns(self):
         with TemporaryDirectory() as temp:
             path = Path(temp) / "old.sqlite3"

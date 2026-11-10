@@ -108,6 +108,33 @@ The adapters reach their systems on loopback, so those systems never need to be 
 
 Delivery goes to the log, plus optionally phone push via [ntfy](https://ntfy.sh) (`VORTEX_ALERT_NTFY_TOPIC`), a Slack/Discord-style webhook (`VORTEX_ALERT_WEBHOOK`), or a command run without a shell (`VORTEX_ALERT_COMMAND`, for example to start a Claude session). See `.env.example`.
 
+## Storage
+
+Vortex stores agents, messages, tasks and audit records in SQLite by default (`<VORTEX_DATA_DIR>/vortex.sqlite3`).
+Set `VORTEX_STORE_URL` to run it on Postgres (Supabase) instead; agent-facing tools behave the same on both.
+
+| Variable | Meaning |
+|---|---|
+| `VORTEX_STORE_URL` | Unset: SQLite. A `postgresql://` connection string: Postgres, connecting as `vortex_writer`. Never logged. |
+| `VORTEX_SCHEMA` | Postgres schema to use (default `forge`). |
+| `VORTEX_MIGRATE_URL` | Admin connection used only by `python -m vortex migrate`. |
+
+1. **Migrate once, as an admin:** `VORTEX_MIGRATE_URL=<admin connection> python -m vortex migrate`. It creates the
+   schema and tables and a `vortex_writer` role (`NOLOGIN`) with row access only, no DDL. Give a login role
+   membership of `vortex_writer` (or `LOGIN` with its own password) and use that in `VORTEX_STORE_URL`.
+2. **Use a direct or session-mode connection,** not Supabase's transaction-mode pooler: the schema search path
+   and the single-instance lock are session state.
+3. **One server per schema.** Vortex holds a Postgres advisory lock; a second server on the same schema refuses to
+   start, and a server that loses the lock after a reconnect refuses every call until restarted.
+4. **Ledger relay.** Every task event and operator action is also written to an `outbox` table in the same
+   transaction. `python -m vortex relay` (install with the `unisync` extra; needs `VORTEX_STORE_URL`,
+   `UNISYNC_GATEWAY_URL`, `UNISYNC_VORTEX_TOKEN`) copies each row to the UniSync ledger exactly once, as a
+   `memory.write` from `vortex` in scope `forge`, key `outbox/<id>`. It backs off up to 5 minutes on failure and
+   never logs payloads or tokens.
+
+Tests run on SQLite by default; set `VORTEX_TEST_DATABASE_URL` to a throwaway Postgres to run the same suite there
+(CI does both).
+
 ## Development
 
 To add more configured agent connections, set `VORTEX_AGENT_IDS` to a comma-separated list such as `hermes-1,hermes-2,antigravity-1,spark-1,oracle-1`. The server then requires matching `VORTEX_TOKEN_<AGENT>` and OAuth client mapping values for every configured identity. Preferred config names are `VORTEX_CLIENT_<AGENT>`; legacy `VORTEX_SUBJECT_<AGENT>` values still work for compatibility.

@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 from mcp.server.auth.provider import AccessToken
 
+from tests.backends import make_store, sqlite_only
 from vortex.server import create_server
 from vortex.settings import Settings
-from vortex.store import VortexStore
 
 AGENTS = ("hermes-1", "hermes-2", "spark-1", "claude-operator")
 
@@ -27,7 +27,7 @@ class OperatorStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.store = VortexStore(
+        self.store = make_store(
             Path(self.temp.name) / "op.sqlite3", agents={agent: agent for agent in AGENTS}
         )
         self.addCleanup(self.store.close)
@@ -54,6 +54,7 @@ class OperatorStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.operator_list_tasks("claude-operator", assigned_to="nobody")
 
+    @sqlite_only
     def test_operator_task_lists_load_dependencies_in_one_query(self):
         parent = self.store.create_task(
             "hermes-1", "parent", requires_approval=True
@@ -102,6 +103,7 @@ class OperatorStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.operator_cancel_task("claude-operator", task["task_id"], "again")
 
+    @sqlite_only
     def test_overview_counts_work_presence_and_unread(self):
         self.store.register("hermes-2")
         t = self.store.create_task("hermes-1", "x", assigned_to="hermes-2")
@@ -181,7 +183,7 @@ class OperatorSettingsTests(unittest.TestCase):
 
 class OperatorServerTests(unittest.TestCase):
     def setUp(self):
-        self.store = VortexStore(":memory:", agents={agent: agent for agent in AGENTS})
+        self.store = make_store(":memory:", agents={agent: agent for agent in AGENTS})
         self.addCleanup(self.store.close)
         settings = Settings(
             auth_mode="development", host="127.0.0.1", port=8000, data_dir=".vortex-data",
@@ -234,7 +236,7 @@ class OperatorServerTests(unittest.TestCase):
             development_tokens={agent: f"token-{agent}" for agent in AGENTS},
         )
         with self.assertRaises(RuntimeError):
-            create_server(VortexStore(":memory:", agents={a: a for a in AGENTS}), bad)
+            create_server(make_store(":memory:", agents={a: a for a in AGENTS}), bad)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import logging
 from typing import Any
 from urllib.parse import urlparse
 
@@ -21,6 +21,8 @@ from .auth import IntrospectionTokenVerifier
 from .settings import AGENT_IDS, Settings
 from .spine import advisory_task_goals, survey_organs
 from .store import VortexStore
+
+logger = logging.getLogger("vortex.server")
 
 load_dotenv()
 
@@ -88,10 +90,14 @@ def create_server(store: VortexStore | None = None, settings: Settings | None = 
         raise RuntimeError("Approval policy must name configured agent IDs or '*': " + ", ".join(unknown_policy))
     if store is None:
         store = VortexStore(
-            os.path.join(settings.data_dir, "vortex.sqlite3"),
+            settings.store_target,
             agents={agent: agent for agent in agent_ids},
             approval_required_for=approval_policy,
+            schema=settings.schema,
         )
+        store.acquire_instance_lock()
+        # Name the backend and schema only: the store URL holds a password.
+        logger.info("store: %s (schema %s)", settings.store_backend, settings.schema)
     else:
         store.set_approval_policy(approval_policy)
 

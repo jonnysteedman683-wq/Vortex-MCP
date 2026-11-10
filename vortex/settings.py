@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
+
+from .db import POSTGRES_PREFIXES, check_schema_name
 
 DEFAULT_AGENT_IDS = ("hermes-1", "hermes-2", "antigravity-1", "spark-1")
 AGENT_IDS = DEFAULT_AGENT_IDS
@@ -90,6 +92,19 @@ def _optional_ca_bundle(name: str) -> str | None:
     return value
 
 
+def parse_store() -> tuple[str | None, str]:
+    url = os.getenv("VORTEX_STORE_URL", "").strip() or None
+    if url is not None and not url.startswith(POSTGRES_PREFIXES):
+        # Do not echo the value: it may hold a password.
+        raise RuntimeError("VORTEX_STORE_URL must be a postgresql:// connection string")
+    schema = os.getenv("VORTEX_SCHEMA", "forge").strip()
+    try:
+        check_schema_name(schema)
+    except ValueError:
+        raise RuntimeError("VORTEX_SCHEMA must match ^[a-z_][a-z0-9_]{0,62}$") from None
+    return url, schema
+
+
 @dataclass(frozen=True)
 class Settings:
     auth_mode: str
@@ -109,6 +124,18 @@ class Settings:
     development_tokens: dict[str, str] | None = None
     operator_ids: tuple[str, ...] = ()
     approval_required_for: tuple[str, ...] = ()
+    # The connection string carries a password: never part of repr, logs or errors.
+    store_url: str | None = field(default=None, repr=False)
+    schema: str = "forge"
+
+    @property
+    def store_backend(self) -> str:
+        return "postgres" if self.store_url else "sqlite"
+
+    @property
+    def store_target(self) -> str:
+        """What VortexStore opens: the Postgres URL, or today's SQLite file in the data dir."""
+        return self.store_url or os.path.join(self.data_dir, "vortex.sqlite3")
 
     @property
     def agent_client_ids(self) -> dict[str, str] | None:
@@ -123,6 +150,7 @@ class Settings:
         agent_ids = _parse_agent_ids()
         operator_ids = _parse_operator_ids(agent_ids)
         approval_required_for = _parse_approval_policy(agent_ids)
+        store_url, schema = parse_store()
         if approval_required_for and not operator_ids:
             raise RuntimeError(
                 "VORTEX_APPROVAL_REQUIRED_FOR needs at least one VORTEX_OPERATOR_IDS entry to approve tasks"
@@ -142,6 +170,7 @@ class Settings:
                 mode, host, port, data_dir,
                 agent_ids=agent_ids, development_tokens=tokens, operator_ids=operator_ids,
                 approval_required_for=approval_required_for,
+                store_url=store_url, schema=schema,
             )
         if mode == "oauth":
             identity_clients = {}
@@ -174,6 +203,8 @@ class Settings:
                 identity_clients=identity_clients,
                 operator_ids=operator_ids,
                 approval_required_for=approval_required_for,
+                store_url=store_url,
+                schema=schema,
                 allowed_hosts=tuple(
                     h.strip()
                     for h in _required("VORTEX_ALLOWED_HOSTS").split(",")
